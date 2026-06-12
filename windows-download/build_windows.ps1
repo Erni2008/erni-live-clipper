@@ -76,6 +76,16 @@ if (!$SkipBundledTools) {
   $tools = Ensure-WindowsTools
 }
 
+$oldBuild = "build\ERNI Live Clipper"
+$oldAppDir = "dist\ERNI Live Clipper"
+$oldOneFile = "dist\ERNI Live Clipper.exe"
+$oldZip = "dist\ERNI Live Clipper Windows.zip"
+foreach ($path in @($oldBuild, $oldAppDir, $oldOneFile, $oldZip)) {
+  if (Test-Path $path) {
+    Remove-Item -Recurse -Force $path
+  }
+}
+
 $buildMode = if ($OneFile) { "--onefile" } else { "--onedir" }
 $buildArgs = @(
   "-m", "PyInstaller",
@@ -109,9 +119,6 @@ if ($OneFile) {
     Copy-Item $tools.YtDlp (Join-Path $toolsDir "yt-dlp.exe") -Force
     Copy-Item $tools.Ffmpeg (Join-Path $toolsDir "ffmpeg.exe") -Force
     Copy-Item $tools.Ffprobe (Join-Path $toolsDir "ffprobe.exe") -Force
-  }
-  if (Test-Path $zipPath) {
-    Remove-Item -Force $zipPath
   }
   Compress-Archive -Path "$appDir\*" -DestinationPath $zipPath
   Write-Host "Built: $exePath"

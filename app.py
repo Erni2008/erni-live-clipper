@@ -117,7 +117,14 @@ def find_executable(name: str) -> str | None:
 
     if platform.system() == "Windows":
         exe_dir = Path(sys.executable).parent
-        for directory in (exe_dir / "tools", exe_dir, base_dir / "tools"):
+        app_dir = Path(__file__).resolve().parent
+        for directory in (
+            exe_dir / "tools",
+            exe_dir,
+            base_dir / "tools",
+            app_dir / "tools",
+            app_dir / "vendor" / "windows",
+        ):
             for extension in extensions:
                 candidate = directory / f"{name}{extension}"
                 if candidate.exists() and os.access(candidate, os.X_OK):
@@ -156,6 +163,12 @@ def windows_process_flags(*, new_process_group: bool = False) -> int:
     if new_process_group:
         flags |= int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
     return flags
+
+
+def run_quiet(command: list[str], **kwargs) -> subprocess.CompletedProcess:
+    if os.name == "nt" and "creationflags" not in kwargs:
+        kwargs["creationflags"] = windows_process_flags()
+    return subprocess.run(command, **kwargs)
 
 
 def parse_timecode(value: str) -> float:
@@ -274,7 +287,7 @@ def probe_media(path: Path) -> MediaReport:
         "-show_streams",
         str(path),
     ]
-    completed = subprocess.run(
+    completed = run_quiet(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -338,7 +351,7 @@ def media_duration(path: Path) -> float | None:
         "default=noprint_wrappers=1:nokey=1",
         str(path),
     ]
-    completed = subprocess.run(
+    completed = run_quiet(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -618,7 +631,7 @@ def probe_dash_fragment_start(format_info: dict[str, object], seq: int, temp_dir
     ffprobe = find_executable("ffprobe")
     if not ffprobe:
         raise RuntimeError("ffprobe не найден.")
-    completed = subprocess.run(
+    completed = run_quiet(
         [
             ffprobe,
             "-v",
@@ -808,7 +821,6 @@ class StreamRecorder:
         if self.process is None or self.is_running:
             return time.monotonic() - self.started_at
         return self.stopped_elapsed
-        return time.monotonic() - self.started_at
 
     def start(self, url: str, output_dir: Path) -> Path:
         if self.is_running:
@@ -867,7 +879,7 @@ class StreamRecorder:
             url,
         ]
         self.on_log("$ " + " ".join(resolve_command) + "\n")
-        resolved = subprocess.run(
+        resolved = run_quiet(
             resolve_command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1117,7 +1129,7 @@ class ClipExporter:
             ffmpeg = find_executable("ffmpeg")
             if not ffmpeg:
                 raise RuntimeError("ffmpeg не найден.")
-            clips_dir = output_dir / "clips"
+            clips_dir = output_dir
             clips_dir.mkdir(parents=True, exist_ok=True)
             duration = end - start
             stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -1264,7 +1276,7 @@ class ClipExporter:
         mode: str,
         expected_height: int,
     ) -> Path:
-        clips_dir = output_dir / "clips"
+        clips_dir = output_dir
         temp_dir = output_dir / "temp-live-section"
         clips_dir.mkdir(parents=True, exist_ok=True)
         temp_dir.mkdir(parents=True, exist_ok=True)
@@ -1291,6 +1303,8 @@ class ClipExporter:
             QUALITY_SELECTOR,
             "-S",
             FORMAT_SORT,
+            "--ffmpeg-location",
+            str(Path(ffmpeg).parent),
             "--download-sections",
             section,
             "--force-keyframes-at-cuts",
@@ -1326,6 +1340,7 @@ class ClipExporter:
                 f"Notice: final live clip is {report.width}x{report.height}; "
                 f"max live-DVR format reported by yt-dlp was {expected_height}p.\n"
             )
+        shutil.rmtree(temp_dir, ignore_errors=True)
         return target
 
     def _run_direct(
@@ -1337,6 +1352,7 @@ class ClipExporter:
         label: str,
         mode: str,
     ) -> None:
+        temp_dir: Path | None = None
         try:
             yt_dlp = find_executable("yt-dlp")
             ffmpeg = find_executable("ffmpeg")
@@ -1345,7 +1361,7 @@ class ClipExporter:
             if not ffmpeg:
                 raise RuntimeError("ffmpeg не найден.")
 
-            clips_dir = output_dir / "clips"
+            clips_dir = output_dir
             clips_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             clean_label = safe_name(label, "clip")
@@ -1373,7 +1389,7 @@ class ClipExporter:
                 url,
             ]
             self.on_log("$ " + " ".join(resolve_command) + "\n")
-            resolved = subprocess.run(
+            resolved = run_quiet(
                 resolve_command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1422,10 +1438,13 @@ class ClipExporter:
                     expected_live_height,
                 )
                 report = probe_media(target)
+                if temp_dir:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
                 self.on_finish(True, target, report.message)
                 return
             except Exception as exc:
                 self.on_log(f"Live section mode failed, falling back to DASH fragments: {exc}\n")
+                shutil.rmtree(output_dir / "temp-live-section", ignore_errors=True)
 
             strict_video_candidates = [
                 item for item in video_candidates if _format_height(item) == max_live_height
@@ -1584,6 +1603,8 @@ class ClipExporter:
             audio_source.unlink(missing_ok=True)
             video_source.with_suffix(video_source.suffix + ".ytdl").unlink(missing_ok=True)
             audio_source.with_suffix(audio_source.suffix + ".ytdl").unlink(missing_ok=True)
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
             report = probe_media(target)
             if expected_live_height and (report.height or 0) < expected_live_height:
@@ -1593,6 +1614,8 @@ class ClipExporter:
                 )
             self.on_finish(True, target, report.message)
         except Exception as exc:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
             self.on_finish(False, None, str(exc))
 
     def _run_vod(
@@ -1605,6 +1628,7 @@ class ClipExporter:
         mode: str,
     ) -> None:
         temp_source: Path | None = None
+        temp_dir: Path | None = None
         try:
             yt_dlp = find_executable("yt-dlp")
             ffmpeg = find_executable("ffmpeg")
@@ -1613,7 +1637,7 @@ class ClipExporter:
             if not ffmpeg:
                 raise RuntimeError("ffmpeg не найден.")
 
-            clips_dir = output_dir / "clips"
+            clips_dir = output_dir
             temp_dir = output_dir / "temp-vod"
             clips_dir.mkdir(parents=True, exist_ok=True)
             temp_dir.mkdir(parents=True, exist_ok=True)
@@ -1643,7 +1667,7 @@ class ClipExporter:
                 f"\nResolving saved video range: {format_timecode(start)} - {format_timecode(end)}\n"
             )
             self.on_log("$ " + " ".join(resolve_command) + "\n")
-            resolved = subprocess.run(
+            resolved = run_quiet(
                 resolve_command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1669,82 +1693,50 @@ class ClipExporter:
             if audio_format:
                 self.on_log(f"Saved range audio: {_format_summary(audio_format)}\n")
 
-            if mode == "Original Fast":
-                target = unique_path(clips_dir / f"{stamp}_{clean_label}_{range_name}.mkv")
-                command = [
-                    ffmpeg,
-                    "-y",
-                    "-hide_banner",
-                ]
-                for media_url, headers in media_inputs:
-                    command.extend(ffmpeg_input_options(headers))
-                    command.extend(["-ss", format_timecode(start), "-i", media_url])
-                if len(media_inputs) >= 2:
-                    command.extend(["-map", "0:v:0?", "-map", "1:a:0?"])
-                else:
-                    command.extend(["-map", "0:v:0?", "-map", "0:a:0?"])
-                command.extend([
-                    "-t",
-                    format_timecode(duration),
-                    "-c",
-                    "copy",
-                    "-avoid_negative_ts",
-                    "make_zero",
-                    str(target),
-                ])
-                self.on_log("\nCutting saved-video range directly from media URLs.\n")
-                code = run_logged(command, self.on_log, self.cancel_event)
-                if code != 0 or not target.exists() or target.stat().st_size == 0:
-                    target.unlink(missing_ok=True)
-                    raise RuntimeError("ffmpeg не смог скачать выбранный диапазон готового видео.")
-            else:
-                target = unique_path(clips_dir / f"{stamp}_{clean_label}_{range_name}.mp4")
-                command = [
-                    ffmpeg,
-                    "-y",
-                    "-hide_banner",
-                ]
-                for media_url, headers in media_inputs:
-                    command.extend(ffmpeg_input_options(headers))
-                    command.extend(["-ss", format_timecode(start), "-i", media_url])
-                if len(media_inputs) >= 2:
-                    command.extend(["-map", "0:v:0?", "-map", "1:a:0?"])
-                else:
-                    command.extend(["-map", "0:v:0?", "-map", "0:a:0?"])
-                command.extend([
-                    "-t",
-                    format_timecode(duration),
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "veryfast" if platform.system() != "Windows" else "ultrafast",
-                    "-crf",
-                    "20",
-                    "-profile:v",
-                    "high",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-fps_mode",
-                    "cfr",
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "192k",
-                    "-ar",
-                    "48000",
-                    "-ac",
-                    "2",
-                    "-max_muxing_queue_size",
-                    "4096",
-                    "-movflags",
-                    "+faststart",
-                    str(target),
-                ])
-                self.on_log("\nConverting saved-video range to Universal Editing MP4.\n")
-                code = run_logged(command, self.on_log, self.cancel_event)
-                if code != 0 or not target.exists() or target.stat().st_size == 0:
-                    target.unlink(missing_ok=True)
-                    raise RuntimeError("ffmpeg не смог создать Universal MP4 из готового видео.")
+            section = f"*{format_timecode(start)}-{format_timecode(end)}"
+            temp_template = str(temp_dir / f"{stamp}_{clean_label}_{range_name}.%(ext)s")
+            before = {path for path in temp_dir.glob(f"{stamp}_{clean_label}_{range_name}.*")}
+            download_command = [
+                yt_dlp,
+                "--no-playlist",
+                "--no-color",
+                "--newline",
+                "--retries",
+                "10",
+                "--fragment-retries",
+                "10",
+                "-f",
+                QUALITY_SELECTOR,
+                "-S",
+                FORMAT_SORT,
+                "--ffmpeg-location",
+                str(Path(ffmpeg).parent),
+                "--download-sections",
+                section,
+                "--force-keyframes-at-cuts",
+                "--merge-output-format",
+                "mkv",
+                "-o",
+                temp_template,
+                url,
+            ]
+            self.on_log("\nDownloading saved-video range with yt-dlp section mode.\n")
+            code = run_logged(download_command, self.on_log, self.cancel_event)
+            candidates = [
+                path
+                for path in temp_dir.glob(f"{stamp}_{clean_label}_{range_name}.*")
+                if path not in before and path.is_file() and path.stat().st_size > 0 and not path.name.endswith(".part")
+            ]
+            if code != 0 or not candidates:
+                raise RuntimeError("yt-dlp не смог скачать выбранный диапазон готового видео.")
+
+            temp_source = max(candidates, key=lambda path: path.stat().st_mtime)
+            raw_report = probe_media(temp_source)
+            self.on_log(f"Downloaded saved-video range check: {raw_report.message}\n")
+
+            suffix = temp_source.suffix if mode == "Original Fast" else ".mp4"
+            target = unique_path(clips_dir / f"{stamp}_{clean_label}_{range_name}{suffix}")
+            self._convert_downloaded_range(ffmpeg, temp_source, target, duration, mode)
 
             report = probe_media(target)
             self.on_finish(True, target, report.message)
@@ -1752,6 +1744,9 @@ class ClipExporter:
             if temp_source:
                 temp_source.unlink(missing_ok=True)
             self.on_finish(False, None, str(exc))
+        finally:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _download_live_prefix(
         self,
@@ -2907,7 +2902,7 @@ class LiveClipperApp(tk.Tk):
                 "-J",
                 url,
             ]
-            completed = subprocess.run(
+            completed = run_quiet(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -3258,7 +3253,7 @@ class LiveClipperApp(tk.Tk):
             "-J",
             url,
         ]
-        completed = subprocess.run(
+        completed = run_quiet(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
