@@ -88,30 +88,28 @@ $buildArgs = @(
   "app.py"
 )
 
-if ($tools) {
-  $buildArgs = @(
-    "-m", "PyInstaller",
-    "-y",
-    "--name", "ERNI Live Clipper",
-    "--windowed",
-    $buildMode,
-    "--add-data", "HOTKEYS.md;.",
-    "--add-data", "WINDOWS_BUILD.md;.",
-    "--add-binary", "$($tools.YtDlp);.",
-    "--add-binary", "$($tools.Ffmpeg);.",
-    "--add-binary", "$($tools.Ffprobe);.",
-    "app.py"
-  )
-}
-
 & $python @buildArgs
 
 if ($OneFile) {
+  if ($tools) {
+    $toolsDir = "dist\tools"
+    New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+    Copy-Item $tools.YtDlp (Join-Path $toolsDir "yt-dlp.exe") -Force
+    Copy-Item $tools.Ffmpeg (Join-Path $toolsDir "ffmpeg.exe") -Force
+    Copy-Item $tools.Ffprobe (Join-Path $toolsDir "ffprobe.exe") -Force
+  }
   Write-Host "Built: dist\ERNI Live Clipper.exe"
 } else {
   $appDir = "dist\ERNI Live Clipper"
   $exePath = "$appDir\ERNI Live Clipper.exe"
   $zipPath = "dist\ERNI Live Clipper Windows.zip"
+  if ($tools) {
+    $toolsDir = Join-Path $appDir "tools"
+    New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+    Copy-Item $tools.YtDlp (Join-Path $toolsDir "yt-dlp.exe") -Force
+    Copy-Item $tools.Ffmpeg (Join-Path $toolsDir "ffmpeg.exe") -Force
+    Copy-Item $tools.Ffprobe (Join-Path $toolsDir "ffprobe.exe") -Force
+  }
   if (Test-Path $zipPath) {
     Remove-Item -Force $zipPath
   }

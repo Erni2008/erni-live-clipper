@@ -115,6 +115,14 @@ def find_executable(name: str) -> str | None:
     if platform.system() == "Windows":
         extensions = [".exe", ".cmd", ".bat", ""]
 
+    if platform.system() == "Windows":
+        exe_dir = Path(sys.executable).parent
+        for directory in (exe_dir / "tools", exe_dir, base_dir / "tools"):
+            for extension in extensions:
+                candidate = directory / f"{name}{extension}"
+                if candidate.exists() and os.access(candidate, os.X_OK):
+                    return str(candidate)
+
     for extension in extensions:
         bundled = base_dir / f"{name}{extension}"
         if bundled.exists() and os.access(bundled, os.X_OK):
@@ -139,6 +147,15 @@ def open_path(path: Path) -> None:
         os.startfile(str(path))  # type: ignore[attr-defined]
     else:
         subprocess.Popen(["xdg-open", str(path)])
+
+
+def windows_process_flags(*, new_process_group: bool = False) -> int:
+    if os.name != "nt":
+        return 0
+    flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if new_process_group:
+        flags |= int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    return flags
 
 
 def parse_timecode(value: str) -> float:
@@ -194,11 +211,9 @@ def bundled_path(name: str) -> Path:
 
 
 def run_logged(command: list[str], on_log, cancel_event: threading.Event | None = None) -> int:
-    creationflags = 0
+    creationflags = windows_process_flags(new_process_group=True)
     popen_kwargs: dict[str, object] = {}
-    if os.name == "nt":
-        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
-    else:
+    if os.name != "nt":
         popen_kwargs["preexec_fn"] = os.setsid
 
     on_log("$ " + " ".join(f'"{item}"' if " " in item else item for item in command) + "\n")
@@ -911,11 +926,9 @@ class StreamRecorder:
         ffmpeg_command.extend(["-c", "copy", "-f", "matroska", str(self.output_file)])
         self.on_log("$ ffmpeg ... " + str(self.output_file) + "\n\n")
 
-        creationflags = 0
+        creationflags = windows_process_flags(new_process_group=True)
         popen_kwargs: dict[str, object] = {}
-        if os.name == "nt":
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
-        else:
+        if os.name != "nt":
             popen_kwargs["preexec_fn"] = os.setsid
 
         ffmpeg_proc = subprocess.Popen(
@@ -1769,11 +1782,9 @@ class ClipExporter:
         ]
         self.on_log(f"\nDownloading {label} until {format_timecode(needed_duration)} from stream start.\n")
         self.on_log("$ " + " ".join(command) + "\n")
-        creationflags = 0
+        creationflags = windows_process_flags(new_process_group=True)
         popen_kwargs: dict[str, object] = {}
-        if os.name == "nt":
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
-        else:
+        if os.name != "nt":
             popen_kwargs["preexec_fn"] = os.setsid
         process = subprocess.Popen(
             command,
@@ -1876,10 +1887,16 @@ class GlobalHotkeyManager:
             self.listener = None
             if platform.system() != "Darwin":
                 self.on_status("Global hotkeys: needs permission")
-            self.on_log(
-                f"{label} could not start. On macOS allow Accessibility for this app. "
-                f"Details: {exc}\n"
-            )
+            if platform.system() == "Windows":
+                self.on_log(
+                    f"{label} could not start on Windows. If a game runs as administrator, "
+                    f"run ERNI Live Clipper as administrator too. Details: {exc}\n"
+                )
+            else:
+                self.on_log(
+                    f"{label} could not start. On macOS allow Accessibility for this app. "
+                    f"Details: {exc}\n"
+                )
 
     def _start_macos_nsevent(self) -> None:
         if self.mac_event_monitors:
@@ -2175,6 +2192,7 @@ class LiveClipperApp(tk.Tk):
         self.active_job: ClipJob | None = None
         self.last_hotkey_name = ""
         self.last_hotkey_at = 0.0
+        self.last_missing_live_url_at = 0.0
         self.marker_thread: threading.Thread | None = None
         self.marker_tracking = False
         self.marker_release_timestamp: float | None = None
@@ -2333,19 +2351,19 @@ class LiveClipperApp(tk.Tk):
         right = ttk.Frame(body, style="Panel.TFrame", padding=20)
         right.grid(row=0, column=1, sticky="nsew")
 
-        notebook = ttk.Notebook(left)
-        notebook.pack(fill="both", expand=True)
-        marker_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=20)
-        live_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=20)
-        saved_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=20)
-        notebook.add(marker_tab, text="Stream Markers")
-        notebook.add(live_tab, text="Live Clipper")
-        notebook.add(saved_tab, text="Saved Video Range")
+        self.notebook = ttk.Notebook(left)
+        self.notebook.pack(fill="both", expand=True)
+        self.marker_tab = ttk.Frame(self.notebook, style="Panel.TFrame", padding=20)
+        self.live_tab = ttk.Frame(self.notebook, style="Panel.TFrame", padding=20)
+        self.saved_tab = ttk.Frame(self.notebook, style="Panel.TFrame", padding=20)
+        self.notebook.add(self.marker_tab, text="Stream Markers")
+        self.notebook.add(self.live_tab, text="Live Clipper")
+        self.notebook.add(self.saved_tab, text="Saved Video Range")
 
-        self._build_marker_panel(marker_tab)
-        self._build_capture_panel(live_tab)
-        self._build_clip_panel(live_tab)
-        self._build_saved_video_panel(saved_tab)
+        self._build_marker_panel(self.marker_tab)
+        self._build_capture_panel(self.live_tab)
+        self._build_clip_panel(self.live_tab)
+        self._build_saved_video_panel(self.saved_tab)
         self._build_log_panel(right)
         self._build_clips_table(right)
 
@@ -2701,32 +2719,38 @@ class LiveClipperApp(tk.Tk):
         for sequence in ("<F11>", "<KeyPress-F11>"):
             bind(sequence, lambda _event: self._shortcut_mark_moment())
 
-        for modifier in ("Command", "Control", "Mod1", "Mod2", "Option"):
-            bind(f"<{modifier}-1>", lambda _event: self._shortcut_quick_clip(30))
-            bind(f"<{modifier}-2>", lambda _event: self._shortcut_quick_clip(60))
-            bind(f"<{modifier}-3>", lambda _event: self._shortcut_quick_clip(180))
-            bind(f"<{modifier}-4>", lambda _event: self._shortcut_direct_clip())
-            bind(f"<{modifier}-KeyPress-1>", lambda _event: self._shortcut_quick_clip(30))
-            bind(f"<{modifier}-KeyPress-2>", lambda _event: self._shortcut_quick_clip(60))
-            bind(f"<{modifier}-KeyPress-3>", lambda _event: self._shortcut_quick_clip(180))
-            bind(f"<{modifier}-KeyPress-4>", lambda _event: self._shortcut_direct_clip())
-            bind(f"<{modifier}-KP_1>", lambda _event: self._shortcut_quick_clip(30))
-            bind(f"<{modifier}-KP_2>", lambda _event: self._shortcut_quick_clip(60))
-            bind(f"<{modifier}-KP_3>", lambda _event: self._shortcut_quick_clip(180))
-            bind(f"<{modifier}-KP_4>", lambda _event: self._shortcut_direct_clip())
+        if platform.system() == "Darwin":
+            for sequence in (
+                "<Command-KeyPress-1>", "<Command-KP_1>",
+                "<Command-KeyPress-2>", "<Command-KP_2>",
+                "<Command-KeyPress-3>", "<Command-KP_3>",
+                "<Command-KeyPress-4>", "<Command-KP_4>",
+            ):
+                action = {
+                    "1": lambda: self._shortcut_quick_clip(30),
+                    "KP_1": lambda: self._shortcut_quick_clip(30),
+                    "2": lambda: self._shortcut_quick_clip(60),
+                    "KP_2": lambda: self._shortcut_quick_clip(60),
+                    "3": lambda: self._shortcut_quick_clip(180),
+                    "KP_3": lambda: self._shortcut_quick_clip(180),
+                    "4": self._shortcut_direct_clip,
+                    "KP_4": self._shortcut_direct_clip,
+                }[sequence.rsplit("-", 1)[-1].rstrip(">")]
+                bind(sequence, lambda _event, callback=action: callback())
+            bind("<Command-KeyPress-Return>", lambda _event: self._shortcut_direct_clip())
 
-        bind("<Command-Return>", lambda _event: self._shortcut_direct_clip())
-        bind("<Control-Return>", lambda _event: self._shortcut_direct_clip())
-        bind("<Command-KeyPress-Return>", lambda _event: self._shortcut_direct_clip())
-        bind("<Control-KeyPress-Return>", lambda _event: self._shortcut_direct_clip())
-        bind("<Command-KeyRelease-1>", lambda _event: self._shortcut_quick_clip(30))
-        bind("<Command-KeyRelease-2>", lambda _event: self._shortcut_quick_clip(60))
-        bind("<Command-KeyRelease-3>", lambda _event: self._shortcut_quick_clip(180))
-        bind("<Command-KeyRelease-4>", lambda _event: self._shortcut_direct_clip())
-        bind("<Control-KeyRelease-1>", lambda _event: self._shortcut_quick_clip(30))
-        bind("<Control-KeyRelease-2>", lambda _event: self._shortcut_quick_clip(60))
-        bind("<Control-KeyRelease-3>", lambda _event: self._shortcut_quick_clip(180))
-        bind("<Control-KeyRelease-4>", lambda _event: self._shortcut_direct_clip())
+        for prefix in ("Control-Alt", "Control-Mod1", "Control-Option"):
+            bind(f"<{prefix}-KeyPress-1>", lambda _event: self._shortcut_quick_clip(30))
+            bind(f"<{prefix}-KeyPress-2>", lambda _event: self._shortcut_quick_clip(60))
+            bind(f"<{prefix}-KeyPress-3>", lambda _event: self._shortcut_quick_clip(180))
+            bind(f"<{prefix}-KeyPress-4>", lambda _event: self._shortcut_direct_clip())
+            bind(f"<{prefix}-KP_1>", lambda _event: self._shortcut_quick_clip(30))
+            bind(f"<{prefix}-KP_2>", lambda _event: self._shortcut_quick_clip(60))
+            bind(f"<{prefix}-KP_3>", lambda _event: self._shortcut_quick_clip(180))
+            bind(f"<{prefix}-KP_4>", lambda _event: self._shortcut_direct_clip())
+
+        bind("<Control-Alt-KeyPress-Return>", lambda _event: self._shortcut_direct_clip())
+        bind("<Control-Mod1-KeyPress-Return>", lambda _event: self._shortcut_direct_clip())
         for sequence in (
             "<Control-Option-m>", "<Control-Option-M>",
             "<Control-Mod1-m>", "<Control-Mod1-M>",
@@ -2769,6 +2793,47 @@ class LiveClipperApp(tk.Tk):
         self.vod_url_entry.focus_set()
         self.vod_url_entry.icursor("end")
 
+    def _focus_live_url(self) -> None:
+        try:
+            self.notebook.select(self.live_tab)
+        except Exception:
+            pass
+        if hasattr(self, "url_entry"):
+            self.url_entry.focus_set()
+            self.url_entry.selection_range(0, "end")
+
+    def _live_url(self) -> str:
+        return self.url_var.get().strip()
+
+    def _warn_missing_live_url(
+        self,
+        message: str = "Вставь ссылку на live-стрим во вкладке Live Clipper.",
+        *,
+        focus_live_tab: bool = True,
+    ) -> None:
+        if focus_live_tab:
+            self._focus_live_url()
+        elif hasattr(self, "marker_url_entry"):
+            try:
+                self.notebook.select(self.marker_tab)
+            except Exception:
+                pass
+            self.marker_url_entry.focus_set()
+            self.marker_url_entry.selection_range(0, "end")
+        self.status_var.set("Waiting for live URL")
+        now = time.monotonic()
+        if now - self.last_missing_live_url_at < 1.5:
+            return
+        self.last_missing_live_url_at = now
+        messagebox.showwarning(APP_TITLE, message)
+
+    def _require_live_url(self, message: str = "Вставь ссылку на live-стрим во вкладке Live Clipper.") -> str:
+        url = self._live_url()
+        if not url:
+            self._warn_missing_live_url(message)
+            raise RuntimeError(message)
+        return url
+
     def _paste_into_focused_widget(self, event: tk.Event) -> str:
         try:
             text = self.clipboard_get()
@@ -2805,9 +2870,12 @@ class LiveClipperApp(tk.Tk):
         return markers_dir / f"stream_markers_{datetime.now().strftime('%Y-%m-%d')}.txt"
 
     def _start_marker_tracking(self) -> None:
-        url = self.url_var.get().strip()
+        url = self._live_url()
         if not url:
-            messagebox.showwarning(APP_TITLE, "Вставь ссылку на live-стрим.")
+            self._warn_missing_live_url(
+                "Вставь ссылку на live-стрим, потом нажми Start Tracking.",
+                focus_live_tab=False,
+            )
             return
         if self.marker_thread and self.marker_thread.is_alive():
             return
@@ -2971,6 +3039,9 @@ class LiveClipperApp(tk.Tk):
 
     def _download_exact_range(self) -> None:
         try:
+            if not self._live_url():
+                self._warn_missing_live_url("Для Exact Range вставь live-ссылку во вкладке Live Clipper.")
+                return
             start = parse_timecode(self.range_from_var.get())
             end = parse_timecode(self.range_to_var.get())
             if end <= start:
@@ -2987,6 +3058,9 @@ class LiveClipperApp(tk.Tk):
 
     def _download_moment_by_time(self) -> None:
         try:
+            if not self._live_url():
+                self._warn_missing_live_url("Для Manual Moment вставь live-ссылку во вкладке Live Clipper.")
+                return
             moment = parse_timecode(self.moment_var.get())
             before = max(0, int(self.preroll_var.get()))
             after = max(0, int(self.after_var.get()))
@@ -3035,6 +3109,9 @@ class LiveClipperApp(tk.Tk):
             messagebox.showerror(APP_TITLE, str(exc))
 
     def _quick_clip(self, seconds: int) -> None:
+        if not self.recorder.is_running and not self._live_url():
+            self._warn_missing_live_url(f"Для Last {seconds}s вставь live-ссылку во вкладке Live Clipper.")
+            return
         if self.recorder.is_running:
             end = max(0, self.recorder.elapsed - 1)
         else:
@@ -3156,6 +3233,10 @@ class LiveClipperApp(tk.Tk):
     def _has_shortcut_modifier(self, state: int) -> bool:
         # Tk reports modifiers differently across macOS/Tk builds, so accept the
         # common Control/Command/Option/Mod masks instead of relying on one name.
+        if platform.system() == "Windows":
+            has_control = bool(state & 0x0004)
+            has_alt = bool(state & 0x0008) or bool(state & 0x0010) or bool(state & 0x0080)
+            return has_control and has_alt
         modifier_masks = (0x0004, 0x0008, 0x0010, 0x0080, 0x0100, 0x100000, 0x200000)
         return any(state & mask for mask in modifier_masks)
 
@@ -3163,9 +3244,7 @@ class LiveClipperApp(tk.Tk):
         yt_dlp = find_executable("yt-dlp")
         if not yt_dlp:
             raise RuntimeError("yt-dlp не найден.")
-        url = self.url_var.get().strip()
-        if not url:
-            raise RuntimeError("Вставь ссылку на live-стрим.")
+        url = self._require_live_url()
         self.status_var.set("Finding live edge")
         self._append_log("\nFinding current live edge for quick clip...\n")
         command = [
@@ -3229,6 +3308,10 @@ class LiveClipperApp(tk.Tk):
     def _download_direct_range(self, start: float, end: float, label: str, mode: str) -> None:
         try:
             self.save_dir = Path(self.folder_var.get()).expanduser()
+            url = self._live_url()
+            if not url:
+                self._warn_missing_live_url("Для скачивания клипа вставь live-ссылку во вкладке Live Clipper.")
+                return
             tag = self._current_tag()
             job = ClipJob(
                 source_type="direct",
@@ -3240,7 +3323,7 @@ class LiveClipperApp(tk.Tk):
                 mode=mode,
                 root_dir=self.save_dir,
                 output_dir=self._clip_output_dir(self.save_dir, tag),
-                url=self.url_var.get().strip(),
+                url=url,
             )
             self._queue_or_start_export(job)
         except Exception as exc:
