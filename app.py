@@ -1835,7 +1835,6 @@ class GlobalHotkeyManager:
     def start(self) -> None:
         if platform.system() == "Darwin":
             self._start_macos_carbon()
-            self._start_pynput_global("macOS pynput fallback")
             self._start_macos_nsevent()
             return
 
