@@ -15,6 +15,10 @@ import time
 import urllib.request
 import csv
 import ctypes
+try:
+    import resource
+except ImportError:  # Windows.
+    resource = None
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,7 +27,7 @@ from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
 
 
-APP_TITLE = "ERNI Live Clipper"
+APP_TITLE = "ERNI Live Clipper Updated"
 APP_VERSION = "1.0.0"
 QUALITY_SELECTOR = "bestvideo*+bestaudio/best"
 CAPTURE_QUALITY_SELECTOR = (
@@ -31,8 +35,43 @@ CAPTURE_QUALITY_SELECTOR = (
     "bestvideo[height<=1080]+bestaudio/"
     "best[height<=1080]/best"
 )
-FORMAT_SORT = "res,fps,hdr:12,vcodec,br"
+FORMAT_SORT = "height,res,fps,hdr:12,vcodec,br"
 YOUTUBE_EXTRACTOR_ARGS = "youtube:player_client=default,web,ios"
+COOKIE_BROWSER_ORDER = (
+    ("safari", "Safari cookies"),
+    ("chrome", "Chrome cookies"),
+    ("firefox", "Firefox cookies"),
+    ("edge", "Edge cookies"),
+    ("brave", "Brave cookies"),
+    ("opera", "Opera cookies"),
+)
+SECTION_DOWNLOAD_VARIANTS = (
+    (True, "mkv"),
+    (False, "mkv"),
+    (False, "mp4"),
+)
+VOD_SOURCE_FORMAT_ATTEMPTS = (
+    ("default/web/ios max quality", "youtube:player_client=default,web,ios", QUALITY_SELECTOR, ()),
+    ("safari cookies max quality", "youtube:player_client=default,web,ios", QUALITY_SELECTOR, ("--cookies-from-browser", "safari")),
+    ("edge cookies max quality", "youtube:player_client=default,web,ios", QUALITY_SELECTOR, ("--cookies-from-browser", "edge")),
+    ("chrome cookies max quality", "youtube:player_client=default,web,ios", QUALITY_SELECTOR, ("--cookies-from-browser", "chrome")),
+    ("firefox cookies max quality", "youtube:player_client=default,web,ios", QUALITY_SELECTOR, ("--cookies-from-browser", "firefox")),
+    ("brave cookies max quality", "youtube:player_client=default,web,ios", QUALITY_SELECTOR, ("--cookies-from-browser", "brave")),
+    ("opera cookies max quality", "youtube:player_client=default,web,ios", QUALITY_SELECTOR, ("--cookies-from-browser", "opera")),
+    ("android max quality", "youtube:player_client=android", QUALITY_SELECTOR, ()),
+    ("android best available", "youtube:player_client=android", "best", ()),
+    ("web embedded max quality", "youtube:player_client=web_embedded", QUALITY_SELECTOR, ()),
+    ("web embedded best available", "youtube:player_client=web_embedded", "best", ()),
+    ("default/web/ios best available", "youtube:player_client=default,web,ios", "best", ()),
+    ("ios max quality", "youtube:player_client=ios", QUALITY_SELECTOR, ()),
+    ("ios best available", "youtube:player_client=ios", "best", ()),
+    ("safari cookies best available", "youtube:player_client=default,web,ios", "best", ("--cookies-from-browser", "safari")),
+    ("edge cookies best available", "youtube:player_client=default,web,ios", "best", ("--cookies-from-browser", "edge")),
+    ("chrome cookies best available", "youtube:player_client=default,web,ios", "best", ("--cookies-from-browser", "chrome")),
+    ("firefox cookies best available", "youtube:player_client=default,web,ios", "best", ("--cookies-from-browser", "firefox")),
+    ("brave cookies best available", "youtube:player_client=default,web,ios", "best", ("--cookies-from-browser", "brave")),
+    ("opera cookies best available", "youtube:player_client=default,web,ios", "best", ("--cookies-from-browser", "opera")),
+)
 EXPORT_MODES = ("Universal Editing MP4", "Original Fast")
 DASH_FRAGMENT_SECONDS = 5
 LIVE_EDGE_SAFETY_SECONDS = 0
@@ -43,6 +82,7 @@ QUICK_CLIPS = (
     ("5m", 300),
 )
 TAG_PRESETS = ("funny", "rage", "fail", "win", "shorts", "important")
+MEDIA_OUTPUT_SUFFIXES = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".mp3", ".m4a", ".aac", ".opus", ".wav"}
 
 
 def four_char_code(value: str) -> int:
@@ -102,6 +142,20 @@ class ClipJob:
 def ensure_tool_path() -> None:
     current = os.environ.get("PATH", "").split(os.pathsep)
     merged = current[:]
+    if platform.system() == "Windows":
+        base_dir = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+        exe_dir = Path(sys.executable).parent
+        app_dir = Path(__file__).resolve().parent
+        for item in (
+            exe_dir / "tools",
+            exe_dir,
+            base_dir / "tools",
+            app_dir / "tools",
+            app_dir / "vendor" / "windows",
+        ):
+            text = str(item)
+            if text not in merged:
+                merged.append(text)
     for item in EXTRA_TOOL_DIRS:
         if item not in merged:
             merged.append(item)
@@ -171,8 +225,118 @@ def run_quiet(command: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(command, **kwargs)
 
 
+def raise_open_file_limit(target_soft: int = 8192) -> None:
+    if resource is None:
+        return
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        desired = min(max(soft, target_soft), hard)
+        if desired > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
+    except (OSError, ValueError):
+        pass
+
+
+class SleepPreventer:
+    def __init__(self, on_log) -> None:
+        self.on_log = on_log
+        self.process: subprocess.Popen[str] | None = None
+
+    def __enter__(self) -> "SleepPreventer":
+        if platform.system() != "Darwin":
+            return self
+        caffeinate = find_executable("caffeinate") or "/usr/bin/caffeinate"
+        try:
+            self.process = subprocess.Popen(
+                [caffeinate, "-dimsu", "-w", str(os.getpid())],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            self.on_log("Sleep prevention enabled for this task.\n")
+        except Exception as exc:
+            self.on_log(f"Could not enable sleep prevention: {exc}\n")
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        process = self.process
+        if process and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        if process:
+            self.on_log("Sleep prevention disabled.\n")
+
+
+def ytdlp_speed_options(*, external_downloader: bool = True, concurrent_fragments: int = 8) -> list[str]:
+    options = ["-N", str(max(1, min(concurrent_fragments, 16)))]
+    if platform.system() == "Darwin":
+        external_downloader = False
+    aria2c = find_executable("aria2c")
+    if external_downloader and aria2c:
+        options.extend(
+            [
+                "--downloader",
+                aria2c,
+                "--downloader-args",
+                "aria2c:-x 16 -s 16 -k 1M --file-allocation=none --summary-interval=0",
+            ]
+        )
+    return options
+
+
+def ytdlp_cookie_attempts() -> tuple[tuple[str, tuple[str, ...]], ...]:
+    return (("no browser cookies", ()),) + tuple(
+        (label, ("--cookies-from-browser", browser)) for browser, label in COOKIE_BROWSER_ORDER
+    )
+
+
+def insert_ytdlp_auth_args(command: list[str], auth_args: tuple[str, ...]) -> list[str]:
+    if not auth_args:
+        return command
+    updated = command[:]
+    insert_at = updated.index("--extractor-args") if "--extractor-args" in updated else 1
+    updated[insert_at:insert_at] = list(auth_args)
+    return updated
+
+
+def resolve_ytdlp_json_with_cookie_attempts(
+    base_command: list[str],
+    on_log,
+    error_message: str,
+) -> dict[str, object]:
+    last_stderr = ""
+    for label, auth_args in ytdlp_cookie_attempts():
+        command = insert_ytdlp_auth_args(base_command, auth_args)
+        on_log(f"$ {' '.join(command)}\n")
+        completed = run_quiet(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if completed.stderr.strip():
+            last_stderr = completed.stderr.strip()
+            on_log(completed.stderr)
+        if completed.returncode != 0:
+            on_log(f"yt-dlp resolve failed with {label}; trying next auth option if available.\n")
+            continue
+        try:
+            return json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            last_stderr = "yt-dlp returned unreadable JSON."
+            on_log(last_stderr + "\n")
+    detail = f"\n{last_stderr}" if last_stderr else ""
+    raise RuntimeError(error_message + detail)
+
+
 def parse_timecode(value: str) -> float:
-    text = value.strip().replace(",", ".")
+    text = value.strip().replace(",", ".").replace(";", ":")
     if not text:
         raise ValueError("Пустой таймкод.")
     parts = text.split(":")
@@ -218,6 +382,15 @@ def unique_path(path: Path) -> Path:
     raise RuntimeError(f"Не удалось создать уникальное имя для {path}")
 
 
+def is_media_output(path: Path) -> bool:
+    return path.suffix.lower() in MEDIA_OUTPUT_SUFFIXES and not path.name.endswith(".part")
+
+
+def is_youtube_live_url(url: str) -> bool:
+    text = url.strip().lower()
+    return "youtube.com/live/" in text or "youtu.be/live/" in text
+
+
 def bundled_path(name: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
     return base / name
@@ -243,12 +416,16 @@ def run_logged(command: list[str], on_log, cancel_event: threading.Event | None 
     )
 
     assert process.stdout is not None
-    for line in process.stdout:
-        on_log(line)
-        if cancel_event and cancel_event.is_set():
-            terminate_process(process)
-            break
-    return process.wait()
+    try:
+        for line in process.stdout:
+            on_log(line)
+            if cancel_event and cancel_event.is_set():
+                terminate_process(process)
+                break
+        return process.wait()
+    finally:
+        if process.stdout:
+            process.stdout.close()
 
 
 def terminate_process(process: subprocess.Popen) -> None:
@@ -365,6 +542,21 @@ def media_duration(path: Path) -> float | None:
     return _safe_float(completed.stdout.strip())
 
 
+def range_duration_ok(path: Path, expected_duration: float, on_log, label: str) -> bool:
+    actual_duration = media_duration(path)
+    if actual_duration is None:
+        on_log(f"{label}: cannot read downloaded duration, trying another method.\n")
+        return False
+    min_duration = max(1.0, expected_duration * 0.80)
+    if actual_duration < min_duration:
+        on_log(
+            f"{label}: downloaded only {format_timecode(actual_duration)} but expected about "
+            f"{format_timecode(expected_duration)}. Rejecting this broken section.\n"
+        )
+        return False
+    return True
+
+
 def ffmpeg_input_options(headers: dict[str, object] | None) -> list[str]:
     if not headers:
         return []
@@ -404,6 +596,15 @@ def media_inputs_from_info(info: dict[str, object]) -> list[tuple[str, dict[str,
         headers = info.get("http_headers")
         return [(media_url, headers if isinstance(headers, dict) else {})]
     return []
+
+
+def info_is_active_live(info: dict[str, object]) -> bool:
+    live_status = str(info.get("live_status") or "").lower()
+    if live_status in {"is_live", "is_upcoming", "post_live"}:
+        return True
+    if info.get("is_live") is True:
+        return True
+    return False
 
 
 def capture_inputs_from_info(info: dict[str, object]) -> tuple[
@@ -601,6 +802,51 @@ def live_format_candidates(info: dict[str, object]) -> tuple[list[dict[str, obje
         sorted(video_candidates, key=video_score, reverse=True),
         sorted(audio_candidates, key=audio_score, reverse=True),
     )
+
+
+def live_format_candidates_any(info: dict[str, object]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    formats = info.get("formats")
+    if not isinstance(formats, list):
+        raise RuntimeError("yt-dlp не вернул список форматов live.")
+
+    dict_formats = [item for item in formats if isinstance(item, dict)]
+    video_candidates = [
+        item
+        for item in dict_formats
+        if item.get("vcodec") not in {None, "none"}
+        and item.get("acodec") in {None, "none"}
+        and item.get("format_id")
+    ]
+    audio_candidates = [
+        item
+        for item in dict_formats
+        if item.get("acodec") not in {None, "none"}
+        and item.get("vcodec") in {None, "none"}
+        and item.get("format_id")
+    ]
+    if not video_candidates:
+        raise RuntimeError("Не нашел отдельный video-only формат для надежного скачивания.")
+    if not audio_candidates:
+        audio_candidates = [
+            item
+            for item in dict_formats
+            if item.get("acodec") not in {None, "none"} and item.get("format_id")
+        ]
+    if not audio_candidates:
+        raise RuntimeError("Не нашел audio формат для надежного скачивания.")
+
+    def video_score(item: dict[str, object]) -> tuple[float, float, float, float]:
+        return (
+            float(_format_height(item)),
+            float(_format_width(item)),
+            _format_float(item, "fps"),
+            max(_format_float(item, "tbr"), _format_float(item, "vbr")),
+        )
+
+    def audio_score(item: dict[str, object]) -> tuple[float, float]:
+        return (max(_format_float(item, "abr"), _format_float(item, "tbr")), _format_float(item, "asr"))
+
+    return sorted(video_candidates, key=video_score, reverse=True), sorted(audio_candidates, key=audio_score, reverse=True)
 
 
 def select_best_live_formats(info: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
@@ -878,27 +1124,15 @@ class StreamRecorder:
             "-J",
             url,
         ]
-        self.on_log("$ " + " ".join(resolve_command) + "\n")
-        resolved = run_quiet(
-            resolve_command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        if resolved.stderr.strip():
-            self.on_log(resolved.stderr)
-        if resolved.returncode != 0:
-            self.on_status("Error")
-            self.on_log("\nyt-dlp could not resolve this live stream.\n")
-            return
         try:
-            info = json.loads(resolved.stdout)
-        except json.JSONDecodeError:
+            info = resolve_ytdlp_json_with_cookie_attempts(
+                resolve_command,
+                self.on_log,
+                "yt-dlp could not resolve this live stream.",
+            )
+        except RuntimeError as exc:
             self.on_status("Error")
-            self.on_log("\nyt-dlp returned unreadable stream data.\n")
+            self.on_log(f"\n{exc}\n")
             return
 
         media_inputs, video_format, audio_format = capture_inputs_from_info(info)
@@ -1124,7 +1358,25 @@ class ClipExporter:
         )
         self.thread.start()
 
+    def export_full_video(self, url: str, target_file: Path) -> None:
+        if self.is_running:
+            raise RuntimeError("Экспорт уже идет.")
+        if not url.strip():
+            raise RuntimeError("Вставь ссылку на стрим или видео.")
+        self.cancel_event.clear()
+        self.thread = threading.Thread(
+            target=self._run_full_video,
+            args=(url.strip(), target_file),
+            name="full-video-downloader",
+            daemon=True,
+        )
+        self.thread.start()
+
     def _run(self, source: Path, output_dir: Path, start: float, end: float, label: str, mode: str) -> None:
+        with SleepPreventer(self.on_log):
+            self._run_awake(source, output_dir, start, end, label, mode)
+
+    def _run_awake(self, source: Path, output_dir: Path, start: float, end: float, label: str, mode: str) -> None:
         try:
             ffmpeg = find_executable("ffmpeg")
             if not ffmpeg:
@@ -1220,6 +1472,9 @@ class ClipExporter:
     ) -> None:
         if mode == "Original Fast":
             shutil.move(str(source), str(target))
+            if not range_duration_ok(target, duration, self.on_log, "Final range check"):
+                target.unlink(missing_ok=True)
+                raise RuntimeError("Downloaded range is shorter than requested; rejected broken output.")
             return
         command = [
             ffmpeg,
@@ -1262,7 +1517,397 @@ class ClipExporter:
         if code != 0 or not target.exists() or target.stat().st_size == 0:
             target.unlink(missing_ok=True)
             raise RuntimeError("ffmpeg не смог создать Universal MP4.")
+        if not range_duration_ok(target, duration, self.on_log, "Final range check"):
+            target.unlink(missing_ok=True)
+            raise RuntimeError("Downloaded range is shorter than requested; rejected broken output.")
         source.unlink(missing_ok=True)
+
+    def _ensure_vegas_mp4(self, ffmpeg: str, source: Path, target_file: Path) -> Path:
+        report = probe_media(source)
+        if source.suffix.lower() == ".mp4" and report.compatible:
+            return source
+
+        self.on_log(
+            "\nFull video is not Vegas-safe MP4 yet; converting to H.264 + AAC.\n"
+            f"Current file check: {report.message}\n"
+        )
+        target_file = target_file.with_suffix(".mp4")
+        temp_target = unique_path(target_file.parent / f"{target_file.stem}_vegas_tmp.mp4")
+        command = [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0?",
+            "-map",
+            "0:a:0?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast" if platform.system() != "Windows" else "ultrafast",
+            "-crf",
+            "18",
+            "-profile:v",
+            "high",
+            "-pix_fmt",
+            "yuv420p",
+            "-fps_mode",
+            "cfr",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            str(temp_target),
+        ]
+        code = run_logged(command, self.on_log, self.cancel_event)
+        if code != 0 or not temp_target.exists() or temp_target.stat().st_size == 0:
+            temp_target.unlink(missing_ok=True)
+            raise RuntimeError("ffmpeg не смог создать MP4, совместимый с Sony Vegas.")
+
+        converted_report = probe_media(temp_target)
+        if not converted_report.compatible:
+            temp_target.unlink(missing_ok=True)
+            raise RuntimeError(f"После конвертации файл все еще не подходит для Vegas: {converted_report.message}")
+
+        final_target = target_file if source == target_file or not target_file.exists() else unique_path(target_file)
+        if final_target.exists() and final_target != source:
+            final_target.unlink()
+        temp_target.replace(final_target)
+        if source != final_target:
+            source.unlink(missing_ok=True)
+        self.on_log(f"Vegas-ready file check: {converted_report.message}\n")
+        return final_target
+
+    def _cut_local_vod_source(
+        self,
+        ffmpeg: str,
+        source: Path,
+        target: Path,
+        start: float,
+        duration: float,
+        mode: str,
+    ) -> None:
+        command = [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-ss",
+            format_timecode(start),
+            "-i",
+            str(source),
+            "-t",
+            format_timecode(duration),
+            "-map",
+            "0:v:0?",
+            "-map",
+            "0:a:0?",
+        ]
+        if mode == "Original Fast":
+            command.extend(["-c", "copy", "-avoid_negative_ts", "make_zero"])
+        else:
+            command.extend(
+                [
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast" if platform.system() != "Windows" else "ultrafast",
+                    "-crf",
+                    "20",
+                    "-profile:v",
+                    "high",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-fps_mode",
+                    "cfr",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                    "-ar",
+                    "48000",
+                    "-ac",
+                    "2",
+                    "-movflags",
+                    "+faststart",
+                ]
+            )
+        command.append(str(target))
+
+        self.on_log("\nCutting selected range from local source file.\n")
+        code = run_logged(command, self.on_log, self.cancel_event)
+        if code != 0 or not target.exists() or target.stat().st_size == 0:
+            target.unlink(missing_ok=True)
+            raise RuntimeError("ffmpeg не смог вырезать диапазон из локального файла.")
+
+    def _download_vod_section_fast(
+        self,
+        yt_dlp: str,
+        ffmpeg: str,
+        url: str,
+        temp_dir: Path,
+        clips_dir: Path,
+        stamp: str,
+        clean_label: str,
+        range_name: str,
+        start: float,
+        end: float,
+        mode: str,
+    ) -> Path:
+        section = f"*{format_timecode(start)}-{format_timecode(end)}"
+        duration = end - start
+        section_prefix = f"{stamp}_{clean_label}_{range_name}_section"
+        temp_template = str(temp_dir / f"{section_prefix}.%(ext)s")
+        self.on_log("\nFast range download: trying to download only the selected section.\n")
+
+        candidates: list[Path] = []
+        last_code = 0
+        for force_keyframes, merge_format in SECTION_DOWNLOAD_VARIANTS:
+            for attempt_label, attempt_extractor_args, format_selector, extra_args in VOD_SOURCE_FORMAT_ATTEMPTS:
+                before = {path for path in temp_dir.glob(f"{section_prefix}.*")}
+                command = [
+                    yt_dlp,
+                    "--no-playlist",
+                    "--no-color",
+                    "--geo-bypass",
+                    "--newline",
+                    "--retries",
+                    "10",
+                    "--fragment-retries",
+                    "10",
+                    *ytdlp_speed_options(external_downloader=False, concurrent_fragments=1),
+                    "--extractor-args",
+                    attempt_extractor_args,
+                    "-f",
+                    format_selector,
+                    "-S",
+                    FORMAT_SORT,
+                    "--ffmpeg-location",
+                    str(Path(ffmpeg).parent),
+                    "--download-sections",
+                    section,
+                    "--merge-output-format",
+                    merge_format,
+                    "-o",
+                    temp_template,
+                    url,
+                ]
+                if force_keyframes:
+                    command.insert(command.index("--merge-output-format"), "--force-keyframes-at-cuts")
+                if extra_args:
+                    insert_at = command.index("-f")
+                    command[insert_at:insert_at] = list(extra_args)
+                keyframe_label = "keyframe cut" if force_keyframes else "plain section"
+                self.on_log(f"\nFast range attempt: {attempt_label}; {keyframe_label}; {merge_format.upper()}.\n")
+                last_code = run_logged(command, self.on_log, self.cancel_event)
+                candidates = [
+                    path
+                    for path in temp_dir.glob(f"{section_prefix}.*")
+                    if path not in before
+                    and path.is_file()
+                    and path.stat().st_size > 0
+                    and is_media_output(path)
+                ]
+                if last_code == 0 and candidates:
+                    section_candidate = max(candidates, key=lambda path: path.stat().st_mtime)
+                    if range_duration_ok(section_candidate, duration, self.on_log, "Fast range attempt"):
+                        break
+                    for path in candidates:
+                        path.unlink(missing_ok=True)
+                    candidates = []
+                for path in candidates:
+                    path.unlink(missing_ok=True)
+            if last_code == 0 and candidates:
+                break
+
+        if last_code != 0 or not candidates:
+            raise RuntimeError("fast section download did not create a video file")
+
+        section_source = max(candidates, key=lambda path: path.stat().st_mtime)
+        raw_report = probe_media(section_source)
+        self.on_log(f"Downloaded fast section check: {raw_report.message}\n")
+
+        suffix = section_source.suffix if mode == "Original Fast" else ".mp4"
+        target = unique_path(clips_dir / f"{stamp}_{clean_label}_{range_name}{suffix}")
+        self._convert_downloaded_range(ffmpeg, section_source, target, duration, mode)
+        return target
+
+    def _download_vod_full_source_then_cut(
+        self,
+        yt_dlp: str,
+        ffmpeg: str,
+        url: str,
+        temp_dir: Path,
+        clips_dir: Path,
+        stamp: str,
+        clean_label: str,
+        range_name: str,
+        start: float,
+        end: float,
+        mode: str,
+    ) -> Path:
+        source_prefix = f"{stamp}_{clean_label}_{range_name}_full_source"
+        temp_template = str(temp_dir / f"{source_prefix}.%(ext)s")
+        duration = end - start
+        self.on_log(
+            "\nReliable VOD mode for a long range: downloading the source first, "
+            "then cutting exact timestamps locally.\n"
+        )
+
+        candidates: list[Path] = []
+        last_code = 0
+        for attempt_label, attempt_extractor_args, format_selector, extra_args in VOD_SOURCE_FORMAT_ATTEMPTS:
+            before = {path for path in temp_dir.glob(f"{source_prefix}.*")}
+            command = [
+                yt_dlp,
+                "--no-playlist",
+                "--no-color",
+                "--geo-bypass",
+                "--newline",
+                "--retries",
+                "10",
+                "--fragment-retries",
+                "10",
+                *ytdlp_speed_options(external_downloader=True, concurrent_fragments=6),
+                "--extractor-args",
+                attempt_extractor_args,
+                "-f",
+                format_selector,
+                "-S",
+                FORMAT_SORT,
+                "--ffmpeg-location",
+                str(Path(ffmpeg).parent),
+                "--merge-output-format",
+                "mkv",
+                "-o",
+                temp_template,
+                url,
+            ]
+            if extra_args:
+                insert_at = command.index("-f")
+                command[insert_at:insert_at] = list(extra_args)
+            self.on_log(f"\nFull source attempt for long range: {attempt_label}.\n")
+            last_code = run_logged(command, self.on_log, self.cancel_event)
+            candidates = [
+                path
+                for path in temp_dir.glob(f"{source_prefix}.*")
+                if path not in before
+                and path.is_file()
+                and path.stat().st_size > 0
+                and is_media_output(path)
+            ]
+            if last_code == 0 and candidates:
+                break
+            for path in candidates:
+                path.unlink(missing_ok=True)
+
+        if last_code != 0 or not candidates:
+            raise RuntimeError("yt-dlp не смог скачать источник для большого диапазона.")
+
+        source = max(candidates, key=lambda path: path.stat().st_mtime)
+        source_report = probe_media(source)
+        self.on_log(f"Full source check: {source_report.message}\n")
+        suffix = source.suffix if mode == "Original Fast" else ".mp4"
+        target = unique_path(clips_dir / f"{stamp}_{clean_label}_{range_name}{suffix}")
+        self._cut_local_vod_source(ffmpeg, source, target, start, duration, mode)
+        if not range_duration_ok(target, duration, self.on_log, "Full-source final range check"):
+            target.unlink(missing_ok=True)
+            raise RuntimeError("Full-source range output is shorter than requested.")
+        source.unlink(missing_ok=True)
+        return target
+
+    def _run_full_video(self, url: str, target_file: Path) -> None:
+        with SleepPreventer(self.on_log):
+            self._run_full_video_awake(url, target_file)
+
+    def _run_full_video_awake(self, url: str, target_file: Path) -> None:
+        try:
+            yt_dlp = find_executable("yt-dlp")
+            ffmpeg = find_executable("ffmpeg")
+            if not yt_dlp:
+                raise RuntimeError("yt-dlp не найден.")
+            if not ffmpeg:
+                raise RuntimeError("ffmpeg не найден.")
+
+            target_file = target_file.expanduser()
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            requested_suffix = target_file.suffix.lower() if target_file.suffix else ".mp4"
+            if requested_suffix not in {".mp4", ".mkv", ".webm"}:
+                requested_suffix = ".mp4"
+                target_file = target_file.with_suffix(requested_suffix)
+            target_file = unique_path(target_file)
+            merge_format = "mkv" if requested_suffix == ".mp4" else requested_suffix.lstrip(".")
+            output_template = str(target_file.with_suffix(".%(ext)s"))
+            before = {path for path in target_file.parent.glob(f"{target_file.stem}.*")}
+
+            self.on_log(f"\nFull stream/video download in maximum quality: {url}\n")
+            candidates: list[Path] = []
+            last_code = 0
+            for attempt_label, attempt_extractor_args, format_selector, extra_args in VOD_SOURCE_FORMAT_ATTEMPTS:
+                command = [
+                    yt_dlp,
+                    "--no-playlist",
+                    "--no-color",
+                    "--geo-bypass",
+                    "--newline",
+                    "--retries",
+                    "10",
+                    "--fragment-retries",
+                    "10",
+                    *ytdlp_speed_options(external_downloader=True, concurrent_fragments=4),
+                    "--extractor-args",
+                    attempt_extractor_args,
+                    "-f",
+                    format_selector,
+                    "-S",
+                    FORMAT_SORT,
+                    "--ffmpeg-location",
+                    str(Path(ffmpeg).parent),
+                    "--merge-output-format",
+                    merge_format,
+                    "-o",
+                    output_template,
+                    url,
+                ]
+                if extra_args:
+                    insert_at = command.index("-f")
+                    command[insert_at:insert_at] = list(extra_args)
+                self.on_log(f"\nFull download attempt: {attempt_label} -> MAX {merge_format.upper()} source.\n")
+                last_code = run_logged(command, self.on_log, self.cancel_event)
+                candidates = [
+                    path
+                    for path in target_file.parent.glob(f"{target_file.stem}.*")
+                    if path not in before
+                    and path.is_file()
+                    and path.stat().st_size > 0
+                    and is_media_output(path)
+                ]
+                if last_code == 0 and candidates:
+                    break
+                for path in candidates:
+                    path.unlink(missing_ok=True)
+
+            if last_code != 0 or not candidates:
+                raise RuntimeError("yt-dlp не смог скачать весь стрим/видео в максимальном качестве.")
+
+            result = max(candidates, key=lambda path: path.stat().st_mtime)
+            if result != target_file and result.suffix.lower() == target_file.suffix.lower():
+                final_target = unique_path(target_file)
+                result.replace(final_target)
+                result = final_target
+            if target_file.suffix.lower() == ".mp4":
+                result = self._ensure_vegas_mp4(ffmpeg, result, target_file)
+            report = probe_media(result)
+            self.on_finish(True, result, report.message)
+        except Exception as exc:
+            self.on_finish(False, None, str(exc))
 
     def _run_live_section_download(
         self,
@@ -1286,44 +1931,70 @@ class ClipExporter:
         range_name = f"{format_timecode(start).replace(':', '-')}_{format_timecode(end).replace(':', '-')}"
         section = f"*{format_timecode(start)}-{format_timecode(end)}"
         temp_template = str(temp_dir / f"{stamp}_{clean_label}_{range_name}.%(ext)s")
-        before = {path for path in temp_dir.glob(f"{stamp}_{clean_label}_{range_name}.*")}
-        command = [
-            yt_dlp,
-            "--no-playlist",
-            "--no-color",
-            "--newline",
-            "--retries",
-            "10",
-            "--fragment-retries",
-            "10",
-            "--extractor-args",
-            YOUTUBE_EXTRACTOR_ARGS,
-            "--live-from-start",
-            "-f",
-            QUALITY_SELECTOR,
-            "-S",
-            FORMAT_SORT,
-            "--ffmpeg-location",
-            str(Path(ffmpeg).parent),
-            "--download-sections",
-            section,
-            "--force-keyframes-at-cuts",
-            "--merge-output-format",
-            "mkv",
-            "-o",
-            temp_template,
-            url,
-        ]
         self.on_log(
             f"\nLive max-quality section download: {format_timecode(start)} - {format_timecode(end)}\n"
         )
-        self.on_log("$ " + " ".join(command) + "\n")
-        code = run_logged(command, self.on_log, self.cancel_event)
-        candidates = [
-            path
-            for path in temp_dir.glob(f"{stamp}_{clean_label}_{range_name}.*")
-            if path not in before and path.is_file() and path.stat().st_size > 0 and not path.name.endswith(".part")
-        ]
+        candidates: list[Path] = []
+        code = 0
+        for force_keyframes, merge_format in SECTION_DOWNLOAD_VARIANTS:
+            for attempt_label, attempt_extractor_args, format_selector, extra_args in VOD_SOURCE_FORMAT_ATTEMPTS:
+                before = {path for path in temp_dir.glob(f"{stamp}_{clean_label}_{range_name}.*")}
+                command = [
+                    yt_dlp,
+                    "--no-playlist",
+                    "--no-color",
+                    "--geo-bypass",
+                    "--newline",
+                    "--retries",
+                    "10",
+                    "--fragment-retries",
+                    "10",
+                    *ytdlp_speed_options(external_downloader=False, concurrent_fragments=1),
+                    "--extractor-args",
+                    attempt_extractor_args,
+                    "--live-from-start",
+                    "-f",
+                    format_selector,
+                    "-S",
+                    FORMAT_SORT,
+                    "--ffmpeg-location",
+                    str(Path(ffmpeg).parent),
+                    "--download-sections",
+                    section,
+                    "--merge-output-format",
+                    merge_format,
+                    "-o",
+                    temp_template,
+                    url,
+                ]
+                if force_keyframes:
+                    command.insert(command.index("--merge-output-format"), "--force-keyframes-at-cuts")
+                if extra_args:
+                    insert_at = command.index("-f")
+                    command[insert_at:insert_at] = list(extra_args)
+                keyframe_label = "keyframe cut" if force_keyframes else "plain section"
+                self.on_log(
+                    f"\nLive section attempt: {attempt_label}; {keyframe_label}; {merge_format.upper()}.\n"
+                )
+                self.on_log("$ " + " ".join(command) + "\n")
+                code = run_logged(command, self.on_log, self.cancel_event)
+                candidates = [
+                    path
+                    for path in temp_dir.glob(f"{stamp}_{clean_label}_{range_name}.*")
+                    if path not in before and path.is_file() and path.stat().st_size > 0 and is_media_output(path)
+                ]
+                if code == 0 and candidates:
+                    section_candidate = max(candidates, key=lambda path: path.stat().st_mtime)
+                    if range_duration_ok(section_candidate, end - start, self.on_log, "Live section attempt"):
+                        break
+                    for path in candidates:
+                        path.unlink(missing_ok=True)
+                    candidates = []
+                for path in candidates:
+                    path.unlink(missing_ok=True)
+            if code == 0 and candidates:
+                break
+
         if code != 0 or not candidates:
             raise RuntimeError("yt-dlp не смог скачать live-диапазон через section mode.")
 
@@ -1343,7 +2014,170 @@ class ClipExporter:
         shutil.rmtree(temp_dir, ignore_errors=True)
         return target
 
+    def _run_live_prefix_range_download(
+        self,
+        yt_dlp: str,
+        ffmpeg: str,
+        url: str,
+        output_dir: Path,
+        start: float,
+        end: float,
+        label: str,
+        mode: str,
+        info: dict[str, object],
+    ) -> Path:
+        clips_dir = output_dir
+        temp_dir = output_dir / "temp-live-prefix"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        clean_label = safe_name(label, "clip")
+        range_name = f"{format_timecode(start).replace(':', '-')}_{format_timecode(end).replace(':', '-')}"
+        exact_duration = end - start
+
+        self.on_log(
+            "\nReliable long-range mode: downloading from stream start to requested end, "
+            "then cutting the exact range locally.\n"
+        )
+        video_candidates, audio_candidates = live_format_candidates_any(info)
+        video_format = video_candidates[0]
+        audio_format = audio_candidates[0]
+        video_id = str(video_format.get("format_id"))
+        audio_id = str(audio_format.get("format_id"))
+        video_ext = safe_name(str(video_format.get("ext") or "mp4"), "mp4")
+        audio_ext = safe_name(str(audio_format.get("ext") or "m4a"), "m4a")
+        video_prefix = temp_dir / f"{stamp}_{clean_label}_{range_name}_prefix_video.{video_ext}"
+        audio_prefix = temp_dir / f"{stamp}_{clean_label}_{range_name}_prefix_audio.{audio_ext}"
+
+        self.on_log(f"Reliable video format: {_format_summary(video_format)}\n")
+        self.on_log(f"Reliable audio format: {_format_summary(audio_format)}\n")
+        self.on_log("Starting video and audio prefix downloads in parallel.\n")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            video_future = executor.submit(
+                self._download_live_prefix,
+                yt_dlp,
+                url,
+                video_id,
+                video_prefix,
+                end,
+                "video prefix",
+            )
+            audio_future = executor.submit(
+                self._download_live_prefix,
+                yt_dlp,
+                url,
+                audio_id,
+                audio_prefix,
+                end,
+                "audio prefix",
+            )
+            video_source = video_future.result()
+            audio_source = audio_future.result()
+
+        suffix = ".mkv" if mode == "Original Fast" else ".mp4"
+        target = unique_path(clips_dir / f"{stamp}_{clean_label}_{range_name}{suffix}")
+        if mode == "Original Fast":
+            command = [
+                ffmpeg,
+                "-y",
+                "-hide_banner",
+                "-ss",
+                format_timecode(start),
+                "-i",
+                str(video_source),
+                "-ss",
+                format_timecode(start),
+                "-i",
+                str(audio_source),
+                "-t",
+                format_timecode(exact_duration),
+                "-map",
+                "0:v:0?",
+                "-map",
+                "1:a:0?",
+                "-c",
+                "copy",
+                "-avoid_negative_ts",
+                "make_zero",
+                str(target),
+            ]
+        else:
+            command = [
+                ffmpeg,
+                "-y",
+                "-hide_banner",
+                "-ss",
+                format_timecode(start),
+                "-i",
+                str(video_source),
+                "-ss",
+                format_timecode(start),
+                "-i",
+                str(audio_source),
+                "-t",
+                format_timecode(exact_duration),
+                "-map",
+                "0:v:0?",
+                "-map",
+                "1:a:0?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast" if platform.system() != "Windows" else "ultrafast",
+                "-crf",
+                "20",
+                "-profile:v",
+                "high",
+                "-pix_fmt",
+                "yuv420p",
+                "-fps_mode",
+                "cfr",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+                "-af",
+                "apad",
+                "-shortest",
+                "-movflags",
+                "+faststart",
+                str(target),
+            ]
+
+        self.on_log("\nCutting reliable long-range source locally.\n")
+        code = run_logged(command, self.on_log, self.cancel_event)
+        if code != 0 or not target.exists() or target.stat().st_size == 0:
+            target.unlink(missing_ok=True)
+            raise RuntimeError("ffmpeg не смог создать клип из надежного long-range источника.")
+        if not range_duration_ok(target, exact_duration, self.on_log, "Reliable final range check"):
+            target.unlink(missing_ok=True)
+            raise RuntimeError("Reliable long-range output is shorter than requested.")
+
+        video_source.unlink(missing_ok=True)
+        audio_source.unlink(missing_ok=True)
+        video_source.with_suffix(video_source.suffix + ".ytdl").unlink(missing_ok=True)
+        audio_source.with_suffix(audio_source.suffix + ".ytdl").unlink(missing_ok=True)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return target
+
     def _run_direct(
+        self,
+        url: str,
+        output_dir: Path,
+        start: float,
+        end: float,
+        label: str,
+        mode: str,
+    ) -> None:
+        with SleepPreventer(self.on_log):
+            self._run_direct_awake(url, output_dir, start, end, label, mode)
+
+    def _run_direct_awake(
         self,
         url: str,
         output_dir: Path,
@@ -1360,7 +2194,6 @@ class ClipExporter:
                 raise RuntimeError("yt-dlp не найден.")
             if not ffmpeg:
                 raise RuntimeError("ffmpeg не найден.")
-
             clips_dir = output_dir
             clips_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -1388,24 +2221,27 @@ class ClipExporter:
                 "-J",
                 url,
             ]
-            self.on_log("$ " + " ".join(resolve_command) + "\n")
-            resolved = run_quiet(
+            info = resolve_ytdlp_json_with_cookie_attempts(
                 resolve_command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
+                self.on_log,
+                "yt-dlp не смог получить live-поток от начала стрима.",
             )
-            if resolved.stderr.strip():
-                self.on_log(resolved.stderr)
-            if resolved.returncode != 0:
-                raise RuntimeError("yt-dlp не смог получить live-поток от начала стрима.")
-            try:
-                info = json.loads(resolved.stdout)
-            except json.JSONDecodeError as exc:
-                raise RuntimeError("yt-dlp вернул нечитаемые данные о live-потоке.") from exc
+
+            if exact_duration >= 10 * 60:
+                target = self._run_live_prefix_range_download(
+                    yt_dlp,
+                    ffmpeg,
+                    url,
+                    output_dir,
+                    start,
+                    end,
+                    label,
+                    mode,
+                    info,
+                )
+                report = probe_media(target)
+                self.on_finish(True, target, report.message)
+                return
 
             summaries = live_video_candidate_summaries(info)
             if summaries:
@@ -1417,15 +2253,14 @@ class ClipExporter:
 
             temp_dir = output_dir / "temp-direct"
             temp_dir.mkdir(parents=True, exist_ok=True)
-            video_candidates, audio_candidates = live_format_candidates(info)
-            max_live_height = _format_height(video_candidates[0])
-            expected_live_height = max_live_height
-            if max_live_height and max_live_height < 1440:
+
+            def finish_with_section_fallback(reason: Exception | str, expected_height: int = 0) -> None:
                 self.on_log(
-                    f"yt-dlp currently exposes only {max_live_height}p for live. "
-                    "Using the best format YouTube exposes to the downloader.\n"
+                    "\nFast DASH mode is unavailable for this URL. "
+                    f"Falling back to yt-dlp section download. Reason: {reason}\n"
                 )
-            try:
+                if temp_dir:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
                 target = self._run_live_section_download(
                     yt_dlp,
                     ffmpeg,
@@ -1435,24 +2270,31 @@ class ClipExporter:
                     end,
                     label,
                     mode,
-                    expected_live_height,
+                    expected_height,
                 )
                 report = probe_media(target)
-                if temp_dir:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
                 self.on_finish(True, target, report.message)
-                return
-            except Exception as exc:
-                self.on_log(f"Live section mode failed, falling back to DASH fragments: {exc}\n")
-                shutil.rmtree(output_dir / "temp-live-section", ignore_errors=True)
 
+            try:
+                video_candidates, audio_candidates = live_format_candidates(info)
+            except Exception as exc:
+                finish_with_section_fallback(exc)
+                return
+
+            max_live_height = _format_height(video_candidates[0])
+            expected_live_height = max_live_height
+            if max_live_height and max_live_height < 1440:
+                self.on_log(
+                    f"yt-dlp currently exposes only {max_live_height}p for live. "
+                    "Using the best format YouTube exposes to the downloader.\n"
+                )
             strict_video_candidates = [
                 item for item in video_candidates if _format_height(item) == max_live_height
             ]
             if max_live_height:
                 self.on_log(
                     f"Max live-DVR format reported by yt-dlp: {max_live_height}p. "
-                    "Trying only that height in DASH fallback.\n"
+                    "Downloading that height with fast DASH fragments.\n"
                 )
             local_seek = start
             video_source: Path | None = None
@@ -1509,11 +2351,24 @@ class ClipExporter:
                     break
 
             if not video_source or not audio_source:
-                raise RuntimeError(
-                    "Быстрый режим не смог скачать DASH-фрагменты. "
-                    "Section mode тоже не сработал.\n"
-                    f"Причина: {last_fast_error}"
-                ) from last_fast_error
+                try:
+                    target = self._run_live_prefix_range_download(
+                        yt_dlp,
+                        ffmpeg,
+                        url,
+                        output_dir,
+                        start,
+                        end,
+                        label,
+                        mode,
+                        info,
+                    )
+                    report = probe_media(target)
+                    self.on_finish(True, target, report.message)
+                except Exception as prefix_exc:
+                    self.on_log(f"Reliable long-range fallback failed: {prefix_exc}\n")
+                    finish_with_section_fallback(last_fast_error or "DASH fragments were not downloadable.", expected_live_height)
+                return
 
             if mode == "Original Fast":
                 target = unique_path(clips_dir / f"{stamp}_{clean_label}_{range_name}.mkv")
@@ -1627,7 +2482,18 @@ class ClipExporter:
         label: str,
         mode: str,
     ) -> None:
-        temp_source: Path | None = None
+        with SleepPreventer(self.on_log):
+            self._run_vod_awake(url, output_dir, start, end, label, mode)
+
+    def _run_vod_awake(
+        self,
+        url: str,
+        output_dir: Path,
+        start: float,
+        end: float,
+        label: str,
+        mode: str,
+    ) -> None:
         temp_dir: Path | None = None
         try:
             yt_dlp = find_executable("yt-dlp")
@@ -1647,102 +2513,72 @@ class ClipExporter:
             range_name = f"{format_timecode(start).replace(':', '-')}_{format_timecode(end).replace(':', '-')}"
             duration = end - start
 
-            resolve_command = [
-                yt_dlp,
-                "--no-playlist",
-                "--no-color",
-                "--no-warnings",
-                "--retries",
-                "10",
-                "--fragment-retries",
-                "10",
-                "-f",
-                QUALITY_SELECTOR,
-                "-S",
-                FORMAT_SORT,
-                "-J",
-                url,
-            ]
             self.on_log(
-                f"\nResolving saved video range: {format_timecode(start)} - {format_timecode(end)}\n"
+                f"\nSaved video range: {format_timecode(start)} - {format_timecode(end)}\n"
             )
-            self.on_log("$ " + " ".join(resolve_command) + "\n")
-            resolved = run_quiet(
-                resolve_command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-            )
-            if resolved.stderr.strip():
-                self.on_log(resolved.stderr)
-            if resolved.returncode != 0:
-                raise RuntimeError("yt-dlp не смог получить ссылки на готовое видео.")
-            try:
-                info = json.loads(resolved.stdout)
-            except json.JSONDecodeError as exc:
-                raise RuntimeError("yt-dlp вернул нечитаемые данные о готовом видео.") from exc
+            if is_youtube_live_url(url):
+                resolve_command = [
+                    yt_dlp,
+                    "--no-playlist",
+                    "--no-color",
+                    "--no-warnings",
+                    "--retries",
+                    "10",
+                    "--fragment-retries",
+                    "10",
+                    "--extractor-args",
+                    YOUTUBE_EXTRACTOR_ARGS,
+                    "-S",
+                    FORMAT_SORT,
+                    "-J",
+                    url,
+                ]
+                info = resolve_ytdlp_json_with_cookie_attempts(
+                    resolve_command,
+                    self.on_log,
+                    "yt-dlp не смог определить статус YouTube live-ссылки.",
+                )
+                if info_is_active_live(info):
+                    self.on_log(
+                        "\nActive live URL detected in Saved Video Range. "
+                        "Using live-DVR method.\n"
+                    )
+                    self._run_direct(url, output_dir, start, end, label, mode)
+                    return
+                self.on_log("\nFinished live archive detected. Treating it as a normal saved video.\n")
 
-            media_inputs, video_format, audio_format = capture_inputs_from_info(info)
-            if not media_inputs:
-                raise RuntimeError("yt-dlp не вернул playable-ссылки на готовое видео.")
-            if video_format:
-                self.on_log(f"Saved range video: {_format_summary(video_format)}\n")
-            if audio_format:
-                self.on_log(f"Saved range audio: {_format_summary(audio_format)}\n")
-
-            section = f"*{format_timecode(start)}-{format_timecode(end)}"
-            temp_template = str(temp_dir / f"{stamp}_{clean_label}_{range_name}.%(ext)s")
-            before = {path for path in temp_dir.glob(f"{stamp}_{clean_label}_{range_name}.*")}
-            download_command = [
-                yt_dlp,
-                "--no-playlist",
-                "--no-color",
-                "--newline",
-                "--retries",
-                "10",
-                "--fragment-retries",
-                "10",
-                "-f",
-                QUALITY_SELECTOR,
-                "-S",
-                FORMAT_SORT,
-                "--ffmpeg-location",
-                str(Path(ffmpeg).parent),
-                "--download-sections",
-                section,
-                "--force-keyframes-at-cuts",
-                "--merge-output-format",
-                "mkv",
-                "-o",
-                temp_template,
-                url,
-            ]
-            self.on_log("\nDownloading saved-video range with yt-dlp section mode.\n")
-            code = run_logged(download_command, self.on_log, self.cancel_event)
-            candidates = [
-                path
-                for path in temp_dir.glob(f"{stamp}_{clean_label}_{range_name}.*")
-                if path not in before and path.is_file() and path.stat().st_size > 0 and not path.name.endswith(".part")
-            ]
-            if code != 0 or not candidates:
-                raise RuntimeError("yt-dlp не смог скачать выбранный диапазон готового видео.")
-
-            temp_source = max(candidates, key=lambda path: path.stat().st_mtime)
-            raw_report = probe_media(temp_source)
-            self.on_log(f"Downloaded saved-video range check: {raw_report.message}\n")
-
-            suffix = temp_source.suffix if mode == "Original Fast" else ".mp4"
-            target = unique_path(clips_dir / f"{stamp}_{clean_label}_{range_name}{suffix}")
-            self._convert_downloaded_range(ffmpeg, temp_source, target, duration, mode)
+            if duration >= 10 * 60:
+                target = self._download_vod_full_source_then_cut(
+                    yt_dlp,
+                    ffmpeg,
+                    url,
+                    temp_dir,
+                    clips_dir,
+                    stamp,
+                    clean_label,
+                    range_name,
+                    start,
+                    end,
+                    mode,
+                )
+            else:
+                target = self._download_vod_section_fast(
+                    yt_dlp,
+                    ffmpeg,
+                    url,
+                    temp_dir,
+                    clips_dir,
+                    stamp,
+                    clean_label,
+                    range_name,
+                    start,
+                    end,
+                    mode,
+                )
 
             report = probe_media(target)
             self.on_finish(True, target, report.message)
         except Exception as exc:
-            if temp_source:
-                temp_source.unlink(missing_ok=True)
             self.on_finish(False, None, str(exc))
         finally:
             if temp_dir:
@@ -1757,72 +2593,92 @@ class ClipExporter:
         needed_duration: float,
         label: str,
     ) -> Path:
-        target = unique_path(target)
-        command = [
-            yt_dlp,
-            "--no-playlist",
-            "--no-color",
-            "--newline",
-            "--live-from-start",
-            "--no-part",
-            "--retries",
-            "10",
-            "--fragment-retries",
-            "10",
-            "-f",
-            format_id,
-            "-o",
-            str(target),
-            url,
-        ]
-        self.on_log(f"\nDownloading {label} until {format_timecode(needed_duration)} from stream start.\n")
-        self.on_log("$ " + " ".join(command) + "\n")
-        creationflags = windows_process_flags(new_process_group=True)
-        popen_kwargs: dict[str, object] = {}
-        if os.name != "nt":
-            popen_kwargs["preexec_fn"] = os.setsid
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            creationflags=creationflags,
-            **popen_kwargs,
-        )
+        base_target = unique_path(target)
+        last_error = ""
+        for auth_label, auth_args in ytdlp_cookie_attempts():
+            attempt_target = unique_path(base_target)
+            command = [
+                yt_dlp,
+                "--no-playlist",
+                "--no-color",
+                "--newline",
+                "--live-from-start",
+                "--no-part",
+                "--retries",
+                "10",
+                "--fragment-retries",
+                "10",
+                *ytdlp_speed_options(external_downloader=False, concurrent_fragments=4),
+                "-f",
+                format_id,
+                "-o",
+                str(attempt_target),
+                url,
+            ]
+            command = insert_ytdlp_auth_args(command, auth_args)
+            self.on_log(
+                f"\nDownloading {label} until {format_timecode(needed_duration)} "
+                f"from stream start ({auth_label}).\n"
+            )
+            self.on_log("$ " + " ".join(command) + "\n")
+            creationflags = windows_process_flags(new_process_group=True)
+            popen_kwargs: dict[str, object] = {}
+            if os.name != "nt":
+                popen_kwargs["preexec_fn"] = os.setsid
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                creationflags=creationflags,
+                **popen_kwargs,
+            )
 
-        def read_log() -> None:
-            assert process.stdout is not None
-            for line in process.stdout:
-                self.on_log(line)
+            def read_log() -> None:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    self.on_log(line)
 
-        threading.Thread(target=read_log, name=f"{label}-prefix-log", daemon=True).start()
-        started = time.monotonic()
-        max_wait = max(90, int(needed_duration * 4 + 120))
-        last_duration = 0.0
-        while process.poll() is None:
-            if self.cancel_event.is_set():
-                terminate_process(process)
-                raise RuntimeError("Скачивание клипа отменено.")
-            duration = media_duration(target)
-            if duration:
-                last_duration = duration
-                if duration >= needed_duration:
-                    self.on_log(f"{label} reached {format_timecode(duration)}. Stopping prefix download.\n")
+            threading.Thread(target=read_log, name=f"{label}-prefix-log", daemon=True).start()
+            started = time.monotonic()
+            max_wait = max(90, int(needed_duration * 4 + 120))
+            last_duration = 0.0
+            while process.poll() is None:
+                if self.cancel_event.is_set():
                     terminate_process(process)
+                    raise RuntimeError("Скачивание клипа отменено.")
+                duration = media_duration(attempt_target)
+                if duration:
+                    last_duration = duration
+                    if duration >= needed_duration:
+                        self.on_log(f"{label} reached {format_timecode(duration)}. Stopping prefix download.\n")
+                        terminate_process(process)
+                        break
+                if time.monotonic() - started > max_wait:
+                    terminate_process(process)
+                    last_error = (
+                        f"{label}: не удалось скачать нужную длительность. "
+                        f"Получилось примерно {format_timecode(last_duration)}."
+                    )
                     break
-            if time.monotonic() - started > max_wait:
-                terminate_process(process)
-                raise RuntimeError(
-                    f"{label}: не удалось скачать нужную длительность. Получилось примерно {format_timecode(last_duration)}."
-                )
-            time.sleep(1)
+                time.sleep(1)
 
-        if not target.exists() or target.stat().st_size == 0:
-            raise RuntimeError(f"{label}: yt-dlp не создал файл.")
-        return target
+            if attempt_target.exists() and attempt_target.stat().st_size > 0:
+                final_duration = media_duration(attempt_target) or 0.0
+                if final_duration >= max(1.0, needed_duration * 0.95):
+                    return attempt_target
+                last_error = (
+                    f"{label}: downloaded only {format_timecode(final_duration)}, "
+                    f"needed about {format_timecode(needed_duration)}."
+                )
+            attempt_target.unlink(missing_ok=True)
+            last_error = last_error or f"{label}: yt-dlp не создал файл через {auth_label}."
+            self.on_log(last_error + " Trying next auth option if available.\n")
+
+        raise RuntimeError(last_error or f"{label}: yt-dlp не создал файл.")
 
 
 class GlobalHotkeyManager:
@@ -2185,6 +3041,7 @@ class LiveClipperApp(tk.Tk):
         self.hotkeys = GlobalHotkeyManager(self._hotkey_from_thread, self._log_from_thread, self._hotkey_status_from_thread)
         self.export_queue: list[ClipJob] = []
         self.active_job: ClipJob | None = None
+        self.active_full_download = False
         self.last_hotkey_name = ""
         self.last_hotkey_at = 0.0
         self.last_missing_live_url_at = 0.0
@@ -2223,10 +3080,13 @@ class LiveClipperApp(tk.Tk):
         self.vod_from_var = tk.StringVar(value="01:44:18")
         self.vod_to_var = tk.StringVar(value="01:46:12")
         self.vod_label_var = tk.StringVar(value="")
+        self.full_video_file_var = tk.StringVar(value=str(self.save_dir / "full_stream.mp4"))
         self.moment_var = tk.StringVar(value="00:00:00")
         self.preroll_var = tk.IntVar(value=30)
         self.after_var = tk.IntVar(value=10)
         self.master_file_var = tk.StringVar(value="Master: not recording")
+        self.start_button: ttk.Button | None = None
+        self.stop_button: ttk.Button | None = None
 
         self._configure_style()
         self._build_ui()
@@ -2479,16 +3339,10 @@ class LiveClipperApp(tk.Tk):
 
         controls = ttk.Frame(parent, style="Panel.TFrame")
         controls.pack(fill="x")
-        self.start_button = ttk.Button(controls, text="Start Capture", style="Success.TButton", command=self._start_capture)
-        self.start_button.pack(side="left", fill="x", expand=True)
-        self.stop_button = ttk.Button(controls, text="Stop", style="Danger.TButton", command=self._stop_capture, state="disabled")
-        self.stop_button.pack(side="left", padx=(10, 0))
         open_button = ttk.Button(controls, text="Open", command=self._open_folder)
-        open_button.pack(side="left", padx=(10, 0))
+        open_button.pack(side="left", fill="x", expand=True)
         hotkeys_button = ttk.Button(controls, text="Hotkeys", command=self._open_hotkeys_doc)
         hotkeys_button.pack(side="left", padx=(10, 0))
-        ToolTip(self.start_button, "Fallback: записывать весь live локально, если прямое скачивание не подходит.")
-        ToolTip(self.stop_button, "Остановить запись или отменить текущий экспорт.")
         ToolTip(open_button, "Открыть папку сохранения.")
         ToolTip(hotkeys_button, "Открыть документацию по горячим клавишам.")
 
@@ -2584,8 +3438,41 @@ class LiveClipperApp(tk.Tk):
         paste_button.pack(side="left", padx=(10, 0))
         ToolTip(paste_button, "Вставить ссылку на законченный стрим или видео из буфера.")
 
+        full_box = ttk.Frame(parent, style="Soft.TFrame", padding=14)
+        full_box.pack(fill="x", pady=(14, 0))
+        ttk.Label(
+            full_box,
+            text="Full stream / video download",
+            background="#182033",
+            foreground="#FFFFFF",
+            font=("Arial", 13, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            full_box,
+            text="Скачать весь стрим или видео в максимальном доступном качестве.",
+            background="#182033",
+            foreground="#B6C2D4",
+            font=("Arial", 10),
+            wraplength=620,
+            justify="left",
+        ).pack(anchor="w", pady=(3, 8))
+        full_file_row = ttk.Frame(full_box, style="Soft.TFrame")
+        full_file_row.pack(fill="x")
+        ttk.Entry(full_file_row, textvariable=self.full_video_file_var).pack(side="left", fill="x", expand=True)
+        choose_full_button = ttk.Button(full_file_row, text="Save As", command=self._choose_full_video_file)
+        choose_full_button.pack(side="left", padx=(10, 0))
+        download_full_button = ttk.Button(
+            full_box,
+            text="Download Full Stream / Video",
+            style="Success.TButton",
+            command=self._download_full_video,
+        )
+        download_full_button.pack(fill="x", pady=(10, 0))
+        ToolTip(choose_full_button, "Выбрать файл, куда сохранить весь стрим или видео.")
+        ToolTip(download_full_button, "Скачать всю ссылку в максимальном доступном качестве через встроенный ERNI Stream Downloader.")
+
         range_box = ttk.Frame(parent, style="Soft.TFrame", padding=14)
-        range_box.pack(fill="x", pady=(18, 0))
+        range_box.pack(fill="x", pady=(14, 0))
         ttk.Label(range_box, text="Range to download", background="#182033", foreground="#FFFFFF", font=("Arial", 13, "bold")).pack(anchor="w")
         ttk.Label(
             range_box,
@@ -2640,7 +3527,6 @@ class LiveClipperApp(tk.Tk):
             justify="left",
         ).pack(anchor="w")
 
-
     def _build_log_panel(self, parent: ttk.Frame) -> None:
         ttk.Label(parent, text="3. Live Log", style="Section.TLabel").pack(anchor="w")
         ttk.Label(parent, text="Команды, ошибки и прогресс загрузки.", style="PanelMuted.TLabel").pack(anchor="w", pady=(4, 0))
@@ -2673,11 +3559,11 @@ class LiveClipperApp(tk.Tk):
         self.clips.heading("comment", text="Comment")
         self.clips.heading("mode", text="Mode")
         self.clips.heading("file", text="File")
-        self.clips.column("range", width=120, anchor="w")
-        self.clips.column("tag", width=70, anchor="w")
+        self.clips.column("range", width=130, anchor="w")
+        self.clips.column("tag", width=80, anchor="w")
         self.clips.column("comment", width=140, anchor="w")
-        self.clips.column("mode", width=130, anchor="w")
-        self.clips.column("file", width=220, anchor="w")
+        self.clips.column("mode", width=150, anchor="w")
+        self.clips.column("file", width=260, anchor="w")
         self.clips.pack(fill="x", pady=(12, 8))
         actions = ttk.Frame(parent, style="Panel.TFrame")
         actions.pack(fill="x")
@@ -2787,6 +3673,25 @@ class LiveClipperApp(tk.Tk):
         self.vod_url_var.set(text)
         self.vod_url_entry.focus_set()
         self.vod_url_entry.icursor("end")
+
+    def _choose_full_video_file(self) -> None:
+        initial = Path(self.full_video_file_var.get()).expanduser()
+        if not initial.name:
+            initial = self.save_dir / "full_stream.mp4"
+        chosen = filedialog.asksaveasfilename(
+            title="Save full stream/video as",
+            initialdir=str(initial.parent if initial.parent.exists() else self.save_dir),
+            initialfile=initial.name,
+            defaultextension=".mp4",
+            filetypes=[
+                ("MP4 video", "*.mp4"),
+                ("MKV video", "*.mkv"),
+                ("WebM video", "*.webm"),
+                ("All files", "*.*"),
+            ],
+        )
+        if chosen:
+            self.full_video_file_var.set(chosen)
 
     def _focus_live_url(self) -> None:
         try:
@@ -2902,19 +3807,11 @@ class LiveClipperApp(tk.Tk):
                 "-J",
                 url,
             ]
-            completed = run_quiet(
+            info = resolve_ytdlp_json_with_cookie_attempts(
                 command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
+                lambda text: self.events.put(("log", text)),
+                "yt-dlp не смог получить live-поток.",
             )
-            if completed.returncode != 0:
-                detail = completed.stderr.strip() or "yt-dlp не смог получить live-поток."
-                raise RuntimeError(detail)
-            info = json.loads(completed.stdout)
             epoch = _safe_float(info.get("epoch"))
             release_timestamp = _safe_float(info.get("release_timestamp"))
             title = str(info.get("title") or "YouTube live")
@@ -2999,8 +3896,7 @@ class LiveClipperApp(tk.Tk):
             self.save_dir = Path(self.folder_var.get()).expanduser()
             output = self.recorder.start(url, self.save_dir)
             self.master_file_var.set(f"Master: {output.name}")
-            self.start_button.configure(state="disabled")
-            self.stop_button.configure(state="normal")
+            self._set_capture_buttons("disabled", "normal")
             self._append_log(f"Master file: {output}\n")
         except Exception as exc:
             messagebox.showerror(APP_TITLE, str(exc))
@@ -3013,8 +3909,7 @@ class LiveClipperApp(tk.Tk):
             return
         self.recorder.stop()
         self.status_var.set("Stopping")
-        self.start_button.configure(state="disabled")
-        self.stop_button.configure(state="disabled")
+        self._set_capture_buttons("disabled", "disabled")
 
     def _custom_clip(self) -> None:
         try:
@@ -3101,6 +3996,29 @@ class LiveClipperApp(tk.Tk):
             self._queue_or_start_export(job)
         except Exception as exc:
             self.status_var.set("Export error")
+            messagebox.showerror(APP_TITLE, str(exc))
+
+    def _download_full_video(self) -> None:
+        try:
+            if self.exporter.is_running:
+                raise RuntimeError("Сейчас уже идет экспорт или скачивание.")
+            url = self.vod_url_var.get().strip() or self.url_var.get().strip()
+            if not url:
+                raise RuntimeError("Вставь ссылку на стрим или видео.")
+            target = Path(self.full_video_file_var.get()).expanduser()
+            if not target.name:
+                raise RuntimeError("Выбери файл для сохранения.")
+            if not target.suffix:
+                target = target.with_suffix(".mp4")
+                self.full_video_file_var.set(str(target))
+            self.status_var.set("Downloading full video")
+            self._set_capture_buttons(stop_state="normal")
+            self.active_job = None
+            self.active_full_download = True
+            self._append_log(f"\nFull stream/video download target: {target}\n")
+            self.exporter.export_full_video(url, target)
+        except Exception as exc:
+            self.status_var.set("Download error")
             messagebox.showerror(APP_TITLE, str(exc))
 
     def _quick_clip(self, seconds: int) -> None:
@@ -3253,20 +4171,11 @@ class LiveClipperApp(tk.Tk):
             "-J",
             url,
         ]
-        completed = run_quiet(
+        info = resolve_ytdlp_json_with_cookie_attempts(
             command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
+            self._append_log,
+            "yt-dlp не смог получить live-поток.",
         )
-        if completed.stderr.strip():
-            self._append_log(completed.stderr)
-        if completed.returncode != 0:
-            raise RuntimeError("yt-dlp не смог получить live-поток.")
-        info = json.loads(completed.stdout)
         epoch = _safe_float(info.get("epoch"))
         release_timestamp = _safe_float(info.get("release_timestamp"))
         if epoch is None or release_timestamp is None:
@@ -3328,7 +4237,7 @@ class LiveClipperApp(tk.Tk):
     def _export_clip(self, start: float, end: float, label: str, mode: str) -> None:
         source = self.recorder.output_file
         if not source:
-            raise RuntimeError("Master-файл не выбран. Нажми Start Capture.")
+            raise RuntimeError("Master-файл не выбран. Используй прямое скачивание диапазона по ссылке.")
         self.save_dir = Path(self.folder_var.get()).expanduser()
         tag = self._current_tag()
         job = ClipJob(
@@ -3370,7 +4279,7 @@ class LiveClipperApp(tk.Tk):
     def _start_export_job(self, job: ClipJob) -> None:
         self.active_job = job
         self._update_queue_status()
-        self.stop_button.configure(state="normal")
+        self._set_capture_buttons(stop_state="normal")
         try:
             if job.source_type == "direct":
                 self.status_var.set("Downloading range")
@@ -3394,14 +4303,14 @@ class LiveClipperApp(tk.Tk):
                 )
             else:
                 if not job.source:
-                    raise RuntimeError("Master-файл не выбран. Нажми Start Capture.")
+                    raise RuntimeError("Master-файл не выбран. Используй прямое скачивание диапазона по ссылке.")
                 self.status_var.set("Exporting")
                 self.exporter.export(job.source, job.output_dir, job.start, job.end, job.label, job.mode)
         except Exception:
             self.active_job = None
             self._update_queue_status()
             if not self.recorder.is_running:
-                self.stop_button.configure(state="disabled")
+                self._set_capture_buttons(stop_state="disabled")
             raise
 
     def _start_next_export_job(self) -> None:
@@ -3410,7 +4319,7 @@ class LiveClipperApp(tk.Tk):
         if not self.export_queue:
             self._update_queue_status()
             if not self.recorder.is_running:
-                self.stop_button.configure(state="disabled")
+                self._set_capture_buttons(stop_state="disabled")
             return
         job = self.export_queue.pop(0)
         self._append_log(f"\nStarting queued clip: {job.range_label} ({job.tag}, {job.mode})\n")
@@ -3469,7 +4378,18 @@ class LiveClipperApp(tk.Tk):
     def _tools_status(self) -> str:
         yt = "yt-dlp" if find_executable("yt-dlp") else "yt-dlp missing"
         ffmpeg = "ffmpeg" if find_executable("ffmpeg") else "ffmpeg missing"
-        return f"{yt} + {ffmpeg}"
+        deno = "deno" if find_executable("deno") else "deno missing"
+        aria2c_path = find_executable("aria2c")
+        if platform.system() == "Windows" or aria2c_path:
+            aria2c = "aria2c" if aria2c_path else "aria2c missing"
+            return f"{yt} + {ffmpeg} + {deno} + {aria2c}"
+        return f"{yt} + {ffmpeg} + {deno}"
+
+    def _set_capture_buttons(self, start_state: str | None = None, stop_state: str | None = None) -> None:
+        if start_state is not None and self.start_button is not None:
+            self.start_button.configure(state=start_state)
+        if stop_state is not None and self.stop_button is not None:
+            self.stop_button.configure(state=stop_state)
 
     def _status_from_thread(self, status: str) -> None:
         self.events.put(("status", status))
@@ -3550,11 +4470,9 @@ class LiveClipperApp(tk.Tk):
                 elif kind == "status":
                     self.status_var.set(str(payload))
                     if payload == "Finalizing MP4":
-                        self.start_button.configure(state="disabled")
-                        self.stop_button.configure(state="disabled")
+                        self._set_capture_buttons("disabled", "disabled")
                     if payload in {"Stopped", "Finished", "Error"}:
-                        self.start_button.configure(state="normal")
-                        self.stop_button.configure(state="disabled")
+                        self._set_capture_buttons("normal", "disabled")
                         if self.recorder.output_file:
                             self.master_file_var.set(f"Master: {self.recorder.output_file.name}")
                 elif kind == "hotkey":
@@ -3572,16 +4490,24 @@ class LiveClipperApp(tk.Tk):
                 elif kind == "export_finished":
                     success, path, message = payload  # type: ignore[misc]
                     job = self.active_job
+                    was_full_download = self.active_full_download
                     self.active_job = None
+                    self.active_full_download = False
                     self._update_queue_status()
                     if success and path:
-                        self.status_var.set("Clip ready")
-                        self._append_log(f"\nClip ready: {path}\n{message}\n")
-                        if job:
+                        if was_full_download:
+                            self.status_var.set("Full video ready")
+                            self._append_log(f"\nFull video ready: {path}\n{message}\n")
+                            self.clips.insert("", "end", values=("FULL VIDEO", "", "", "Full max quality", str(path)))
+                        elif job:
+                            self.status_var.set("Clip ready")
+                            self._append_log(f"\nClip ready: {path}\n{message}\n")
                             self._append_clip_metadata(job, path, message)
                             self.clips.insert("", "end", values=(job.range_label, job.tag, job.comment, job.mode, str(path)))
                         else:
-                            self.clips.insert("", "end", values=("", "", "", "", str(path)))
+                            self.status_var.set("File ready")
+                            self._append_log(f"\nFile ready: {path}\n{message}\n")
+                            self.clips.insert("", "end", values=("FILE", "", "", "", str(path)))
                     else:
                         self.status_var.set("Export error")
                         self._append_log(f"\nExport error: {message}\n")
@@ -3613,6 +4539,7 @@ class LiveClipperApp(tk.Tk):
 
 
 def main() -> None:
+    raise_open_file_limit()
     app = LiveClipperApp()
     app.mainloop()
 
