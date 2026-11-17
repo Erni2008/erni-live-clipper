@@ -2989,6 +2989,36 @@ class GlobalHotkeyManager:
             self.listener = None
 
 
+UI_FONT = "SF Pro Display" if platform.system() == "Darwin" else ("Segoe UI" if platform.system() == "Windows" else "Helvetica")
+SETTINGS_PATH = Path.home() / ".erni_live_clipper.json"
+
+
+def load_settings() -> dict:
+    try:
+        return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_settings(data: dict) -> None:
+    try:
+        SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def apply_proxy_env(proxy: str) -> None:
+    """Route yt-dlp, ffmpeg and urllib through a proxy (helps where YouTube is throttled)."""
+    keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+    for key in keys:
+        if proxy:
+            os.environ[key] = proxy
+        else:
+            os.environ.pop(key, None)
+    import urllib.request as _ur
+    _ur.install_opener(_ur.build_opener(_ur.ProxyHandler(_ur.getproxies())))
+
+
 class ToolTip:
     def __init__(self, widget: tk.Widget, text: str) -> None:
         self.widget = widget
@@ -3010,13 +3040,13 @@ class ToolTip:
         label = tk.Label(
             self.window,
             text=self.text,
-            bg="#F8FAFC",
-            fg="#0F172A",
+            bg="#F4F4FA",
+            fg="#0A0A12",
             padx=10,
             pady=7,
             relief="solid",
             borderwidth=1,
-            font=("Arial", 10),
+            font=(UI_FONT, 10),
             justify="left",
         )
         label.pack()
@@ -3031,7 +3061,7 @@ class LiveClipperApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         ensure_tool_path()
-        self.title(f"{APP_TITLE} {APP_VERSION}")
+        self.title(f"ERNI Live Clipper {APP_VERSION}")
         self.geometry("1360x900")
         self.minsize(1120, 720)
 
@@ -3085,6 +3115,10 @@ class LiveClipperApp(tk.Tk):
         self.preroll_var = tk.IntVar(value=30)
         self.after_var = tk.IntVar(value=10)
         self.master_file_var = tk.StringVar(value="Master: not recording")
+        self.proxy_var = tk.StringVar(value=load_settings().get("proxy", ""))
+        self.proxy_status_var = tk.StringVar(value="")
+        apply_proxy_env(self.proxy_var.get().strip())
+        self.proxy_status_var.set(f"Активен: {self.proxy_var.get().strip()}" if self.proxy_var.get().strip() else "Прямое подключение")
         self.start_button: ttk.Button | None = None
         self.stop_button: ttk.Button | None = None
 
@@ -3097,84 +3131,102 @@ class LiveClipperApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _configure_style(self) -> None:
-        self.configure(bg="#0B0F17")
+        self.configure(bg="#0A0A12")
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure(".", font=("Arial", 12), background="#0B0F17", foreground="#F8FAFC")
-        style.configure("TFrame", background="#0B0F17")
-        style.configure("Panel.TFrame", background="#111827")
-        style.configure("Soft.TFrame", background="#182033")
-        style.configure("TLabel", background="#0B0F17", foreground="#F8FAFC")
-        style.configure("Muted.TLabel", background="#0B0F17", foreground="#B6C2D4", font=("Arial", 10))
-        style.configure("Panel.TLabel", background="#111827", foreground="#F8FAFC")
-        style.configure("PanelMuted.TLabel", background="#111827", foreground="#B6C2D4", font=("Arial", 10))
-        style.configure("Section.TLabel", background="#111827", foreground="#FFFFFF", font=("Arial", 15, "bold"))
-        style.configure("Title.TLabel", background="#0B0F17", foreground="#FFFFFF", font=("Arial", 28, "bold"))
-        style.configure("Subtitle.TLabel", background="#0B0F17", foreground="#B6C2D4", font=("Arial", 11))
-        style.configure("Timer.TLabel", background="#182033", foreground="#FFFFFF", font=("Arial", 38, "bold"))
-        style.configure("Status.TLabel", background="#182033", foreground="#8CF7CF", font=("Arial", 13, "bold"))
-        style.configure("SmallStatus.TLabel", background="#182033", foreground="#B6C2D4", font=("Arial", 10, "bold"))
-        style.configure("TButton", padding=(16, 11), font=("Arial", 11, "bold"), background="#263244", foreground="#FFFFFF", borderwidth=1, focusthickness=3, focuscolor="#93C5FD")
-        style.map("TButton", background=[("active", "#334155"), ("focus", "#334155"), ("disabled", "#1E293B")], foreground=[("disabled", "#7B8798")])
-        style.configure("Accent.TButton", background="#0A84FF", foreground="#FFFFFF")
-        style.map("Accent.TButton", background=[("active", "#339BFF"), ("focus", "#339BFF")])
-        style.configure("Success.TButton", background="#0F8B68", foreground="#FFFFFF")
-        style.map("Success.TButton", background=[("active", "#12A77D"), ("focus", "#12A77D")])
-        style.configure("Danger.TButton", background="#C2415A", foreground="#FFFFFF")
-        style.map("Danger.TButton", background=[("active", "#E0526E"), ("focus", "#E0526E")])
-        style.configure("Tag.TButton", padding=(10, 8), font=("Arial", 10, "bold"), background="#1E293B", foreground="#EAF2FF")
-        style.map("Tag.TButton", background=[("active", "#334155"), ("focus", "#334155")])
-        style.configure("TEntry", fieldbackground="#070A10", foreground="#FFFFFF", insertcolor="#FFFFFF", padding=9, bordercolor="#46546A", lightcolor="#46546A", darkcolor="#46546A")
-        style.configure("TSpinbox", fieldbackground="#070A10", foreground="#FFFFFF", insertcolor="#FFFFFF", padding=8, arrowsize=14)
-        style.configure("TCombobox", fieldbackground="#070A10", background="#070A10", foreground="#FFFFFF", padding=9, arrowcolor="#FFFFFF")
-        style.configure("Treeview", background="#0B1220", fieldbackground="#0B1220", foreground="#F8FAFC", rowheight=34, bordercolor="#334155", borderwidth=1)
-        style.map("Treeview", background=[("selected", "#1D4ED8")], foreground=[("selected", "#FFFFFF")])
-        style.configure("Treeview.Heading", background="#1E293B", foreground="#FFFFFF", font=("Arial", 10, "bold"))
-        style.configure("TSeparator", background="#334155")
+        style.configure(".", font=(UI_FONT, 12), background="#0A0A12", foreground="#F4F4FA")
+        style.configure("TFrame", background="#0A0A12")
+        style.configure("Panel.TFrame", background="#12121C")
+        style.configure("Soft.TFrame", background="#1A1A28")
+        style.configure("TLabel", background="#0A0A12", foreground="#F4F4FA")
+        style.configure("Muted.TLabel", background="#0A0A12", foreground="#9A9AB0", font=(UI_FONT, 10))
+        style.configure("Panel.TLabel", background="#12121C", foreground="#F4F4FA")
+        style.configure("PanelMuted.TLabel", background="#12121C", foreground="#9A9AB0", font=(UI_FONT, 10))
+        style.configure("Section.TLabel", background="#12121C", foreground="#FFFFFF", font=(UI_FONT, 15, "bold"))
+        style.configure("Title.TLabel", background="#0A0A12", foreground="#FFFFFF", font=(UI_FONT, 26, "bold"))
+        style.configure("TitleLight.TLabel", background="#0A0A12", foreground="#A78BFA", font=(UI_FONT, 26))
+        style.configure("SoftStrong.TLabel", background="#1A1A28", foreground="#FFFFFF", font=(UI_FONT, 11, "bold"))
+        style.configure("SoftMuted.TLabel", background="#1A1A28", foreground="#9A9AB0", font=(UI_FONT, 10))
+        style.configure("TNotebook", background="#12121C", borderwidth=0, tabmargins=(12, 12, 12, 0))
+        style.configure("TNotebook.Tab", background="#12121C", foreground="#9A9AB0", padding=(16, 10), font=(UI_FONT, 11, "bold"), borderwidth=0)
+        style.map("TNotebook.Tab", background=[("selected", "#1F1F33")], foreground=[("selected", "#FFFFFF")])
+        style.configure("Vertical.TScrollbar", background="#24243A", troughcolor="#0D0D16", bordercolor="#0D0D16", arrowcolor="#9A9AB0")
+        style.map("TEntry", bordercolor=[("focus", "#7C5CFF")], lightcolor=[("focus", "#7C5CFF")])
+        style.map("TCombobox", fieldbackground=[("readonly", "#0D0D16")], foreground=[("readonly", "#FFFFFF")])
+        style.configure("Subtitle.TLabel", background="#0A0A12", foreground="#9A9AB0", font=(UI_FONT, 11))
+        style.configure("Timer.TLabel", background="#1A1A28", foreground="#FFFFFF", font=(UI_FONT, 38, "bold"))
+        style.configure("Status.TLabel", background="#1A1A28", foreground="#4ADE9B", font=(UI_FONT, 13, "bold"))
+        style.configure("SmallStatus.TLabel", background="#1A1A28", foreground="#9A9AB0", font=(UI_FONT, 10, "bold"))
+        style.configure("TButton", padding=(16, 11), relief="flat", font=(UI_FONT, 11, "bold"), background="#24243A", foreground="#FFFFFF", borderwidth=1, focusthickness=3, focuscolor="#A78BFA")
+        style.map("TButton", background=[("active", "#30304C"), ("focus", "#30304C"), ("disabled", "#1F1F33")], foreground=[("disabled", "#5A5A72")])
+        style.configure("Accent.TButton", background="#7C5CFF", foreground="#FFFFFF")
+        style.map("Accent.TButton", background=[("active", "#9277FF"), ("focus", "#9277FF")])
+        style.configure("Success.TButton", background="#16A36B", foreground="#FFFFFF")
+        style.map("Success.TButton", background=[("active", "#1CBF7E"), ("focus", "#1CBF7E")])
+        style.configure("Danger.TButton", background="#E5484D", foreground="#FFFFFF")
+        style.map("Danger.TButton", background=[("active", "#F06368"), ("focus", "#F06368")])
+        style.configure("Tag.TButton", padding=(10, 8), font=(UI_FONT, 10, "bold"), background="#1F1F33", foreground="#E6E6F5")
+        style.map("Tag.TButton", background=[("active", "#30304C"), ("focus", "#30304C")])
+        style.configure("TEntry", fieldbackground="#0D0D16", foreground="#FFFFFF", insertcolor="#FFFFFF", padding=9, bordercolor="#2C2C44", lightcolor="#2C2C44", darkcolor="#2C2C44")
+        style.configure("TSpinbox", fieldbackground="#0D0D16", foreground="#FFFFFF", insertcolor="#FFFFFF", padding=8, arrowsize=14)
+        style.configure("TCombobox", fieldbackground="#0D0D16", background="#0D0D16", foreground="#FFFFFF", padding=9, arrowcolor="#FFFFFF")
+        style.configure("Treeview", background="#0D0D16", fieldbackground="#0D0D16", foreground="#F4F4FA", rowheight=34, bordercolor="#30304C", borderwidth=1)
+        style.map("Treeview", background=[("selected", "#5B3FE0")], foreground=[("selected", "#FFFFFF")])
+        style.configure("Treeview.Heading", background="#1F1F33", foreground="#FFFFFF", font=(UI_FONT, 10, "bold"))
+        style.configure("TSeparator", background="#30304C")
+        flat = dict(bordercolor="#2C2C44", lightcolor="#2C2C44", darkcolor="#2C2C44")
+        style.configure("TSpinbox", **flat, background="#24243A", arrowcolor="#FFFFFF")
+        style.configure("TCombobox", **flat)
+        style.configure("TNotebook", bordercolor="#12121C", lightcolor="#12121C", darkcolor="#12121C")
+        style.configure("TNotebook.Tab", bordercolor="#12121C", lightcolor="#12121C", darkcolor="#12121C")
+        style.configure("Treeview", lightcolor="#2C2C44", darkcolor="#2C2C44", bordercolor="#2C2C44")
+        style.configure("Treeview.Heading", relief="flat", bordercolor="#1F1F33", lightcolor="#1F1F33", darkcolor="#1F1F33")
+        for name in ("TButton", "Accent.TButton", "Success.TButton", "Danger.TButton", "Tag.TButton"):
+            style.configure(name, bordercolor="#0A0A12", lightcolor="#0A0A12", darkcolor="#0A0A12")
 
     def _build_menu(self) -> None:
         menu = tk.Menu(self)
         self.configure(menu=menu)
 
         clip_menu = tk.Menu(menu, tearoff=False)
-        menu.add_cascade(label="Clips", menu=clip_menu)
+        menu.add_cascade(label="Клипы", menu=clip_menu)
         clip_menu.add_command(
-            label="Write stream marker",
+            label="Поставить метку",
             accelerator="F7 / Ctrl+Alt+7",
             command=self._shortcut_write_marker,
         )
         clip_menu.add_separator()
         clip_menu.add_command(
-            label="Last 30 seconds",
+            label="Последние 30 секунд",
             accelerator="Cmd+1" if platform.system() == "Darwin" else "Ctrl+Alt+1",
             command=lambda: self._shortcut_quick_clip(30),
         )
         clip_menu.add_command(
-            label="Last 60 seconds",
+            label="Последние 60 секунд",
             accelerator="Cmd+2" if platform.system() == "Darwin" else "Ctrl+Alt+2",
             command=lambda: self._shortcut_quick_clip(60),
         )
         clip_menu.add_command(
-            label="Last 3 minutes",
+            label="Последние 3 минуты",
             accelerator="Cmd+3" if platform.system() == "Darwin" else "Ctrl+Alt+3",
             command=lambda: self._shortcut_quick_clip(180),
         )
         clip_menu.add_command(
-            label="Exact range",
+            label="Точный диапазон",
             accelerator="Cmd+4" if platform.system() == "Darwin" else "Ctrl+Alt+4",
             command=self._shortcut_direct_clip,
         )
         clip_menu.add_separator()
         clip_menu.add_command(
-            label="Mark moment",
+            label="Отметить момент",
             accelerator="F11",
             command=self._shortcut_mark_moment,
         )
         clip_menu.add_command(
-            label="Open folder",
+            label="Открыть папку",
             accelerator="Cmd+O" if platform.system() == "Darwin" else "Ctrl+O",
             command=self._shortcut_open_folder,
         )
@@ -3188,12 +3240,18 @@ class LiveClipperApp(tk.Tk):
         header.pack(fill="x", pady=(0, 18))
         title_box = ttk.Frame(header)
         title_box.pack(side="left")
-        ttk.Label(title_box, text="ERNI Live Clipper", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(title_box, text="Live moments, tags, comments, queue and edit-ready MP4.", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 0))
+        brand = ttk.Frame(title_box)
+        brand.pack(anchor="w")
+        tk.Label(brand, text=" ● ", bg="#7C5CFF", fg="#FFFFFF", font=(UI_FONT, 14, "bold"), padx=4, pady=2).pack(side="left", padx=(0, 12))
+        ttk.Label(brand, text="ERNI", style="Title.TLabel").pack(side="left")
+        ttk.Label(brand, text=" Live Clipper", style="TitleLight.TLabel").pack(side="left")
+        ttk.Label(title_box, text="Клипы с live-стримов в максимальном качестве — в один клик.", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 0))
         status_box = ttk.Frame(header)
         status_box.pack(side="right", pady=(4, 0))
         ttk.Label(status_box, textvariable=self.tools_var, style="Muted.TLabel").pack(anchor="e")
         ttk.Label(status_box, textvariable=self.hotkey_status_var, style="Muted.TLabel").pack(anchor="e", pady=(4, 0))
+
+        self._build_network_bar(root)
 
         body = ttk.Frame(root)
         body.pack(fill="both", expand=True)
@@ -3211,9 +3269,9 @@ class LiveClipperApp(tk.Tk):
         self.marker_tab = ttk.Frame(self.notebook, style="Panel.TFrame", padding=20)
         self.live_tab = ttk.Frame(self.notebook, style="Panel.TFrame", padding=20)
         self.saved_tab = ttk.Frame(self.notebook, style="Panel.TFrame", padding=20)
-        self.notebook.add(self.marker_tab, text="Stream Markers")
-        self.notebook.add(self.live_tab, text="Live Clipper")
-        self.notebook.add(self.saved_tab, text="Saved Video Range")
+        self.notebook.add(self.marker_tab, text="  Метки стрима  ")
+        self.notebook.add(self.live_tab, text="  Live-клипы  ")
+        self.notebook.add(self.saved_tab, text="  Готовое видео  ")
 
         self._build_marker_panel(self.marker_tab)
         self._build_capture_panel(self.live_tab)
@@ -3222,8 +3280,29 @@ class LiveClipperApp(tk.Tk):
         self._build_log_panel(right)
         self._build_clips_table(right)
 
+    def _build_network_bar(self, parent: ttk.Frame) -> None:
+        bar = ttk.Frame(parent, style="Soft.TFrame", padding=(16, 10))
+        bar.pack(fill="x", pady=(0, 16))
+        ttk.Label(bar, text="🌐  Прокси / VPN", style="SoftStrong.TLabel").pack(side="left")
+        entry = ttk.Entry(bar, textvariable=self.proxy_var, width=38)
+        entry.pack(side="left", padx=(12, 8))
+        apply_button = ttk.Button(bar, text="Применить", style="Tag.TButton", command=self._apply_proxy)
+        apply_button.pack(side="left")
+        ttk.Label(bar, textvariable=self.proxy_status_var, style="SoftMuted.TLabel").pack(side="left", padx=(14, 0))
+        ToolTip(entry, "Если YouTube работает медленно или не открывается (например, в России),\nукажи прокси: socks5://127.0.0.1:1080 или http://host:port.\nОставь пустым, если прокси не нужен или VPN включён на всём компьютере.")
+        ToolTip(apply_button, "Сохранить прокси. Он будет использоваться для yt-dlp и ffmpeg.")
+
+    def _apply_proxy(self) -> None:
+        value = self.proxy_var.get().strip()
+        apply_proxy_env(value)
+        settings = load_settings()
+        settings["proxy"] = value
+        save_settings(settings)
+        self.proxy_status_var.set(f"Активен: {value}" if value else "Прямое подключение")
+        self._log_from_thread(f"Proxy: {value or 'off'}")
+
     def _build_marker_panel(self, parent: ttk.Frame) -> None:
-        ttk.Label(parent, text="1. Stream Marker", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(parent, text="Метки стрима", style="Section.TLabel").pack(anchor="w")
         ttk.Label(
             parent,
             text="Вставь live-ссылку, нажми Start Tracking и ставь метки в TXT без скачивания видео.",
@@ -3234,14 +3313,14 @@ class LiveClipperApp(tk.Tk):
         url_row.pack(fill="x")
         self.marker_url_entry = ttk.Entry(url_row, textvariable=self.url_var)
         self.marker_url_entry.pack(side="left", fill="x", expand=True)
-        paste_button = ttk.Button(url_row, text="Paste", command=lambda: self._paste_url(self.marker_url_entry))
+        paste_button = ttk.Button(url_row, text="Вставить", command=lambda: self._paste_url(self.marker_url_entry))
         paste_button.pack(side="left", padx=(10, 0))
         ToolTip(paste_button, "Вставить ссылку на live из буфера обмена.")
 
         folder_row = ttk.Frame(parent, style="Panel.TFrame")
         folder_row.pack(fill="x", pady=(10, 0))
         ttk.Entry(folder_row, textvariable=self.folder_var).pack(side="left", fill="x", expand=True)
-        folder_button = ttk.Button(folder_row, text="Folder", command=self._choose_folder)
+        folder_button = ttk.Button(folder_row, text="Папка", command=self._choose_folder)
         folder_button.pack(side="left", padx=(10, 0))
         ToolTip(folder_button, "Папка, где будет создан TXT с таймкодами.")
 
@@ -3254,20 +3333,20 @@ class LiveClipperApp(tk.Tk):
         ttk.Label(
             status_right,
             textvariable=self.marker_file_var,
-            background="#182033",
-            foreground="#B6C2D4",
-            font=("Arial", 10),
+            background="#1A1A28",
+            foreground="#9A9AB0",
+            font=(UI_FONT, 10),
             wraplength=420,
             justify="right",
         ).pack(anchor="e", pady=(6, 0))
 
         controls = ttk.Frame(parent, style="Panel.TFrame")
         controls.pack(fill="x")
-        start_button = ttk.Button(controls, text="Start Tracking", style="Success.TButton", command=self._start_marker_tracking)
+        start_button = ttk.Button(controls, text="▶  Начать отслеживание", style="Success.TButton", command=self._start_marker_tracking)
         start_button.pack(side="left", fill="x", expand=True)
-        mark_button = ttk.Button(controls, text="Mark Funny Moment", style="Accent.TButton", command=self._write_stream_marker)
+        mark_button = ttk.Button(controls, text="★  Отметить момент", style="Accent.TButton", command=self._write_stream_marker)
         mark_button.pack(side="left", fill="x", expand=True, padx=(10, 0))
-        open_button = ttk.Button(controls, text="Open TXT", command=self._open_marker_file)
+        open_button = ttk.Button(controls, text="Открыть TXT", command=self._open_marker_file)
         open_button.pack(side="left", padx=(10, 0))
         ToolTip(start_button, "Один раз определить текущий live-таймкод и дальше считать время локально.")
         ToolTip(mark_button, "Записать метку в TXT. Хоткей: F7 или Ctrl+Option+M / Ctrl+Alt+M.")
@@ -3275,26 +3354,26 @@ class LiveClipperApp(tk.Tk):
 
         range_box = ttk.Frame(parent, style="Soft.TFrame", padding=14)
         range_box.pack(fill="x", pady=(18, 0))
-        ttk.Label(range_box, text="Range written to TXT", background="#182033", foreground="#FFFFFF", font=("Arial", 13, "bold")).pack(anchor="w")
+        ttk.Label(range_box, text="Диапазон в TXT", background="#1A1A28", foreground="#FFFFFF", font=(UI_FONT, 13, "bold")).pack(anchor="w")
         ttk.Label(
             range_box,
             text="При метке в документ попадет текущий момент и готовый диапазон From -> To для вкладки Saved Video Range.",
-            background="#182033",
-            foreground="#B6C2D4",
-            font=("Arial", 10),
+            background="#1A1A28",
+            foreground="#9A9AB0",
+            font=(UI_FONT, 10),
             wraplength=700,
             justify="left",
         ).pack(anchor="w", pady=(3, 10))
         range_row = ttk.Frame(range_box, style="Soft.TFrame")
         range_row.pack(fill="x")
-        ttk.Label(range_row, text="Before", background="#182033", foreground="#B6C2D4", font=("Arial", 10)).pack(side="left")
+        ttk.Label(range_row, text="До, сек", background="#1A1A28", foreground="#9A9AB0", font=(UI_FONT, 10)).pack(side="left")
         ttk.Spinbox(range_row, from_=0, to=3600, textvariable=self.marker_before_var, width=7).pack(side="left", padx=(8, 14))
-        ttk.Label(range_row, text="After", background="#182033", foreground="#B6C2D4", font=("Arial", 10)).pack(side="left")
+        ttk.Label(range_row, text="После, сек", background="#1A1A28", foreground="#9A9AB0", font=(UI_FONT, 10)).pack(side="left")
         ttk.Spinbox(range_row, from_=0, to=3600, textvariable=self.marker_after_var, width=7).pack(side="left", padx=(8, 0))
 
         note_box = ttk.Frame(parent, style="Panel.TFrame")
         note_box.pack(fill="x", pady=(16, 0))
-        ttk.Label(note_box, text="Marker note", style="PanelMuted.TLabel").pack(anchor="w")
+        ttk.Label(note_box, text="Заметка к метке", style="PanelMuted.TLabel").pack(anchor="w")
         ttk.Entry(note_box, textvariable=self.marker_note_var).pack(fill="x", pady=(4, 0))
 
         help_box = ttk.Frame(parent, style="Soft.TFrame", padding=14)
@@ -3302,29 +3381,29 @@ class LiveClipperApp(tk.Tk):
         ttk.Label(
             help_box,
             text="Сценарий: Start Tracking -> на смешном моменте F7 -> после стрима открыть TXT -> скопировать ссылку и From/To во вкладку Saved Video Range.",
-            background="#182033",
-            foreground="#DDE7F7",
-            font=("Arial", 10),
+            background="#1A1A28",
+            foreground="#C9C9DD",
+            font=(UI_FONT, 10),
             wraplength=720,
             justify="left",
         ).pack(anchor="w")
 
     def _build_capture_panel(self, parent: ttk.Frame) -> None:
-        ttk.Label(parent, text="1. Live Source", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(parent, text="Источник", style="Section.TLabel").pack(anchor="w")
         ttk.Label(parent, text="Вставь YouTube live. Основной режим скачивает только выбранные моменты.", style="PanelMuted.TLabel").pack(anchor="w", pady=(4, 12))
 
         url_row = ttk.Frame(parent, style="Panel.TFrame")
         url_row.pack(fill="x")
         self.url_entry = ttk.Entry(url_row, textvariable=self.url_var)
         self.url_entry.pack(side="left", fill="x", expand=True)
-        paste_button = ttk.Button(url_row, text="Paste", command=self._paste_url)
+        paste_button = ttk.Button(url_row, text="Вставить", command=self._paste_url)
         paste_button.pack(side="left", padx=(10, 0))
         ToolTip(paste_button, "Вставить ссылку на live из буфера обмена.")
 
         folder_row = ttk.Frame(parent, style="Panel.TFrame")
         folder_row.pack(fill="x", pady=(10, 0))
         ttk.Entry(folder_row, textvariable=self.folder_var).pack(side="left", fill="x", expand=True)
-        folder_button = ttk.Button(folder_row, text="Folder", command=self._choose_folder)
+        folder_button = ttk.Button(folder_row, text="Папка", command=self._choose_folder)
         folder_button.pack(side="left", padx=(10, 0))
         ToolTip(folder_button, "Выбрать папку, куда сохранять клипы и CSV-лог.")
 
@@ -3335,13 +3414,13 @@ class LiveClipperApp(tk.Tk):
         status_right.pack(side="right", fill="x", expand=True, padx=(18, 0))
         ttk.Label(status_right, textvariable=self.status_var, style="Status.TLabel").pack(anchor="e")
         ttk.Label(status_right, textvariable=self.queue_var, style="SmallStatus.TLabel").pack(anchor="e", pady=(5, 0))
-        ttk.Label(status_right, textvariable=self.master_file_var, background="#182033", foreground="#B6C2D4", font=("Arial", 10)).pack(anchor="e", pady=(5, 0))
+        ttk.Label(status_right, textvariable=self.master_file_var, background="#1A1A28", foreground="#9A9AB0", font=(UI_FONT, 10)).pack(anchor="e", pady=(5, 0))
 
         controls = ttk.Frame(parent, style="Panel.TFrame")
         controls.pack(fill="x")
-        open_button = ttk.Button(controls, text="Open", command=self._open_folder)
+        open_button = ttk.Button(controls, text="Открыть папку", command=self._open_folder)
         open_button.pack(side="left", fill="x", expand=True)
-        hotkeys_button = ttk.Button(controls, text="Hotkeys", command=self._open_hotkeys_doc)
+        hotkeys_button = ttk.Button(controls, text="Горячие клавиши", command=self._open_hotkeys_doc)
         hotkeys_button.pack(side="left", padx=(10, 0))
         ToolTip(open_button, "Открыть папку сохранения.")
         ToolTip(hotkeys_button, "Открыть документацию по горячим клавишам.")
@@ -3349,50 +3428,50 @@ class LiveClipperApp(tk.Tk):
     def _build_clip_panel(self, parent: ttk.Frame) -> None:
         sep = ttk.Separator(parent)
         sep.pack(fill="x", pady=18)
-        ttk.Label(parent, text="2. Clip Exporter", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(parent, text="Быстрый клип", style="Section.TLabel").pack(anchor="w")
         ttk.Label(parent, text="Быстрые кнопки берут последние секунды live. Хоткеи: F8=30s, F9=60s, F10=3m, F11=Mark.", style="PanelMuted.TLabel").pack(anchor="w", pady=(4, 12))
 
         quick = ttk.Frame(parent, style="Panel.TFrame")
         quick.pack(fill="x")
         for title, seconds in QUICK_CLIPS:
-            button = ttk.Button(quick, text=f"Last {title}", style="Accent.TButton", command=lambda value=seconds: self._quick_clip(value))
+            button = ttk.Button(quick, text=f"⏪ {title}", style="Accent.TButton", command=lambda value=seconds: self._quick_clip(value))
             button.pack(side="left", padx=(0, 8))
             ToolTip(button, f"Скачать последние {title} live и поставить в очередь, если уже идет экспорт.")
-        mark_button = ttk.Button(quick, text="Mark moment", command=self._mark_moment)
+        mark_button = ttk.Button(quick, text="★ Момент", command=self._mark_moment)
         mark_button.pack(side="left", padx=(8, 0))
         ToolTip(mark_button, "Создать клип вокруг текущего момента записи или значения To.")
 
         tags = ttk.Frame(parent, style="Panel.TFrame")
         tags.pack(fill="x", pady=(12, 0))
-        ttk.Label(tags, text="Tags:", style="PanelMuted.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 6))
+        ttk.Label(tags, text="Теги:", style="PanelMuted.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 6))
         for index, tag in enumerate(TAG_PRESETS):
             button = ttk.Button(tags, text=tag, style="Tag.TButton", command=lambda value=tag: self._set_tag(value))
             button.grid(row=index // 3, column=(index % 3) + 1, sticky="ew", padx=(0, 6), pady=(0, 6))
             tags.columnconfigure((index % 3) + 1, weight=1)
             ToolTip(button, f"Поставить тег {tag}. Клип сохранится в папку этого тега.")
-        clear_tag = ttk.Button(tags, text="Clear", command=lambda: self.label_var.set(""))
+        clear_tag = ttk.Button(tags, text="Сброс", command=lambda: self.label_var.set(""))
         clear_tag.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(0, 6))
         ToolTip(clear_tag, "Очистить тег. Клип попадет в папку untagged.")
 
         range_box = ttk.Frame(parent, style="Soft.TFrame", padding=12)
         range_box.pack(fill="x", pady=(14, 0))
-        ttk.Label(range_box, text="Exact range from live stream", background="#182033", foreground="#FFFFFF", font=("Arial", 12, "bold")).pack(anchor="w")
+        ttk.Label(range_box, text="Точный диапазон", background="#1A1A28", foreground="#FFFFFF", font=(UI_FONT, 12, "bold")).pack(anchor="w")
         ttk.Label(
             range_box,
             text="Введи от и до, например 00:25:00 -> 00:25:15. Скачается ровно этот кусок live.",
-            background="#182033",
-            foreground="#B6C2D4",
-            font=("Arial", 10),
+            background="#1A1A28",
+            foreground="#9A9AB0",
+            font=(UI_FONT, 10),
         ).pack(anchor="w", pady=(2, 8))
         range_row = ttk.Frame(range_box, style="Soft.TFrame")
         range_row.pack(fill="x")
-        ttk.Label(range_row, text="From", background="#182033", foreground="#B6C2D4", font=("Arial", 10)).pack(side="left")
+        ttk.Label(range_row, text="С", background="#1A1A28", foreground="#9A9AB0", font=(UI_FONT, 10)).pack(side="left")
         from_entry = ttk.Entry(range_row, textvariable=self.range_from_var, width=12)
         from_entry.pack(side="left", padx=(8, 12))
-        ttk.Label(range_row, text="To", background="#182033", foreground="#B6C2D4", font=("Arial", 10)).pack(side="left")
+        ttk.Label(range_row, text="По", background="#1A1A28", foreground="#9A9AB0", font=(UI_FONT, 10)).pack(side="left")
         to_entry = ttk.Entry(range_row, textvariable=self.range_to_var, width=12)
         to_entry.pack(side="left", padx=(8, 12))
-        range_button = ttk.Button(range_row, text="Download Exact Range", style="Accent.TButton", command=self._download_exact_range)
+        range_button = ttk.Button(range_row, text="⬇  Скачать диапазон", style="Accent.TButton", command=self._download_exact_range)
         range_button.pack(side="left", fill="x", expand=True)
         ToolTip(from_entry, "Начало клипа. Например: 00:25:00, 25:00 или 1500.")
         ToolTip(to_entry, "Конец клипа. Например: 00:25:15, 25:15 или 1515.")
@@ -3401,26 +3480,26 @@ class LiveClipperApp(tk.Tk):
         form = ttk.Frame(parent, style="Panel.TFrame")
         form.pack(fill="x", pady=(14, 0))
         form.columnconfigure(1, weight=1)
-        ttk.Label(form, text="Tag / label", style="PanelMuted.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(form, text="Тег / название", style="PanelMuted.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Entry(form, textvariable=self.label_var, width=16).grid(row=1, column=0, sticky="ew", padx=(0, 10))
-        ttk.Label(form, text="Mode", style="PanelMuted.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(form, text="Режим экспорта", style="PanelMuted.TLabel").grid(row=0, column=1, sticky="w")
         ttk.Combobox(form, textvariable=self.export_mode_var, values=EXPORT_MODES, state="readonly").grid(row=1, column=1, sticky="ew")
 
         comment = ttk.Frame(parent, style="Panel.TFrame")
         comment.pack(fill="x", pady=(12, 0))
-        ttk.Label(comment, text="Comment for montage log", style="PanelMuted.TLabel").pack(anchor="w")
+        ttk.Label(comment, text="Комментарий для монтажа", style="PanelMuted.TLabel").pack(anchor="w")
         ttk.Entry(comment, textvariable=self.comment_var).pack(fill="x", pady=(4, 0))
 
         offsets = ttk.Frame(parent, style="Panel.TFrame")
         offsets.pack(fill="x", pady=(12, 0))
-        ttk.Label(offsets, text="Moment clip:", style="PanelMuted.TLabel").pack(side="left")
-        ttk.Label(offsets, text="before", style="PanelMuted.TLabel").pack(side="left", padx=(12, 4))
+        ttk.Label(offsets, text="Клип вокруг момента:", style="PanelMuted.TLabel").pack(side="left")
+        ttk.Label(offsets, text="до", style="PanelMuted.TLabel").pack(side="left", padx=(12, 4))
         ttk.Spinbox(offsets, from_=0, to=3600, textvariable=self.preroll_var, width=6).pack(side="left")
-        ttk.Label(offsets, text="after", style="PanelMuted.TLabel").pack(side="left", padx=(12, 4))
+        ttk.Label(offsets, text="после", style="PanelMuted.TLabel").pack(side="left", padx=(12, 4))
         ttk.Spinbox(offsets, from_=0, to=3600, textvariable=self.after_var, width=6).pack(side="left")
 
     def _build_saved_video_panel(self, parent: ttk.Frame) -> None:
-        ttk.Label(parent, text="Saved Video Range", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(parent, text="  Готовое видео  ", style="Section.TLabel").pack(anchor="w")
         ttk.Label(
             parent,
             text="Для законченных стримов и обычных видео: скачивает только выбранный диапазон, не весь ролик.",
@@ -3429,12 +3508,12 @@ class LiveClipperApp(tk.Tk):
 
         url_box = ttk.Frame(parent, style="Panel.TFrame")
         url_box.pack(fill="x")
-        ttk.Label(url_box, text="Finished stream / video URL", style="PanelMuted.TLabel").pack(anchor="w")
+        ttk.Label(url_box, text="Ссылка на запись стрима или видео", style="PanelMuted.TLabel").pack(anchor="w")
         url_row = ttk.Frame(url_box, style="Panel.TFrame")
         url_row.pack(fill="x", pady=(4, 0))
         self.vod_url_entry = ttk.Entry(url_row, textvariable=self.vod_url_var)
         self.vod_url_entry.pack(side="left", fill="x", expand=True)
-        paste_button = ttk.Button(url_row, text="Paste", command=self._paste_vod_url)
+        paste_button = ttk.Button(url_row, text="Вставить", command=self._paste_vod_url)
         paste_button.pack(side="left", padx=(10, 0))
         ToolTip(paste_button, "Вставить ссылку на законченный стрим или видео из буфера.")
 
@@ -3442,28 +3521,28 @@ class LiveClipperApp(tk.Tk):
         full_box.pack(fill="x", pady=(14, 0))
         ttk.Label(
             full_box,
-            text="Full stream / video download",
-            background="#182033",
+            text="Скачать целиком",
+            background="#1A1A28",
             foreground="#FFFFFF",
-            font=("Arial", 13, "bold"),
+            font=(UI_FONT, 13, "bold"),
         ).pack(anchor="w")
         ttk.Label(
             full_box,
             text="Скачать весь стрим или видео в максимальном доступном качестве.",
-            background="#182033",
-            foreground="#B6C2D4",
-            font=("Arial", 10),
+            background="#1A1A28",
+            foreground="#9A9AB0",
+            font=(UI_FONT, 10),
             wraplength=620,
             justify="left",
         ).pack(anchor="w", pady=(3, 8))
         full_file_row = ttk.Frame(full_box, style="Soft.TFrame")
         full_file_row.pack(fill="x")
         ttk.Entry(full_file_row, textvariable=self.full_video_file_var).pack(side="left", fill="x", expand=True)
-        choose_full_button = ttk.Button(full_file_row, text="Save As", command=self._choose_full_video_file)
+        choose_full_button = ttk.Button(full_file_row, text="Сохранить как", command=self._choose_full_video_file)
         choose_full_button.pack(side="left", padx=(10, 0))
         download_full_button = ttk.Button(
             full_box,
-            text="Download Full Stream / Video",
+            text="⬇  Скачать всё видео",
             style="Success.TButton",
             command=self._download_full_video,
         )
@@ -3473,20 +3552,20 @@ class LiveClipperApp(tk.Tk):
 
         range_box = ttk.Frame(parent, style="Soft.TFrame", padding=14)
         range_box.pack(fill="x", pady=(14, 0))
-        ttk.Label(range_box, text="Range to download", background="#182033", foreground="#FFFFFF", font=("Arial", 13, "bold")).pack(anchor="w")
+        ttk.Label(range_box, text="Фрагмент", background="#1A1A28", foreground="#FFFFFF", font=(UI_FONT, 13, "bold")).pack(anchor="w")
         ttk.Label(
             range_box,
             text="Пример: From 01:44:18 -> To 01:46:12. Поддерживает HH:MM:SS, MM:SS и секунды.",
-            background="#182033",
-            foreground="#B6C2D4",
-            font=("Arial", 10),
+            background="#1A1A28",
+            foreground="#9A9AB0",
+            font=(UI_FONT, 10),
         ).pack(anchor="w", pady=(3, 10))
         row = ttk.Frame(range_box, style="Soft.TFrame")
         row.pack(fill="x")
-        ttk.Label(row, text="From", background="#182033", foreground="#B6C2D4", font=("Arial", 10)).pack(side="left")
+        ttk.Label(row, text="С", background="#1A1A28", foreground="#9A9AB0", font=(UI_FONT, 10)).pack(side="left")
         from_entry = ttk.Entry(row, textvariable=self.vod_from_var, width=13)
         from_entry.pack(side="left", padx=(8, 14))
-        ttk.Label(row, text="To", background="#182033", foreground="#B6C2D4", font=("Arial", 10)).pack(side="left")
+        ttk.Label(row, text="По", background="#1A1A28", foreground="#9A9AB0", font=(UI_FONT, 10)).pack(side="left")
         to_entry = ttk.Entry(row, textvariable=self.vod_to_var, width=13)
         to_entry.pack(side="left", padx=(8, 0))
         ToolTip(from_entry, "Начало фрагмента. Например: 01:44:18.")
@@ -3496,21 +3575,21 @@ class LiveClipperApp(tk.Tk):
         options.pack(fill="x", pady=(16, 0))
         options.columnconfigure(0, weight=1)
         options.columnconfigure(1, weight=1)
-        ttk.Label(options, text="Tag / label", style="PanelMuted.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(options, text="Тег / название", style="PanelMuted.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Entry(options, textvariable=self.vod_label_var).grid(row=1, column=0, sticky="ew", padx=(0, 10))
-        ttk.Label(options, text="Mode", style="PanelMuted.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(options, text="Режим экспорта", style="PanelMuted.TLabel").grid(row=0, column=1, sticky="w")
         ttk.Combobox(options, textvariable=self.export_mode_var, values=EXPORT_MODES, state="readonly").grid(row=1, column=1, sticky="ew")
 
         buttons = ttk.Frame(parent, style="Panel.TFrame")
         buttons.pack(fill="x", pady=(18, 0))
         download_button = ttk.Button(
             buttons,
-            text="Download Saved Video Range",
+            text="⬇  Скачать фрагмент",
             style="Accent.TButton",
             command=self._download_vod_range,
         )
         download_button.pack(side="left", fill="x", expand=True)
-        open_button = ttk.Button(buttons, text="Open Folder", command=self._open_folder)
+        open_button = ttk.Button(buttons, text="Открыть папку", command=self._open_folder)
         open_button.pack(side="left", padx=(10, 0))
         ToolTip(download_button, "Скачать только выбранный диапазон готового видео в максимальном доступном качестве.")
         ToolTip(open_button, "Открыть папку сохранения.")
@@ -3520,28 +3599,30 @@ class LiveClipperApp(tk.Tk):
         ttk.Label(
             note,
             text="Для монтажа оставь Universal Editing MP4. Для максимально быстрого сохранения без перекодирования выбери Original Fast.",
-            background="#182033",
-            foreground="#DDE7F7",
-            font=("Arial", 10),
+            background="#1A1A28",
+            foreground="#C9C9DD",
+            font=(UI_FONT, 10),
             wraplength=620,
             justify="left",
         ).pack(anchor="w")
 
     def _build_log_panel(self, parent: ttk.Frame) -> None:
-        ttk.Label(parent, text="3. Live Log", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(parent, text="Журнал", style="Section.TLabel").pack(anchor="w")
         ttk.Label(parent, text="Команды, ошибки и прогресс загрузки.", style="PanelMuted.TLabel").pack(anchor="w", pady=(4, 0))
         log_frame = ttk.Frame(parent, style="Panel.TFrame")
         log_frame.pack(fill="both", expand=True, pady=(12, 14))
         self.log_text = tk.Text(
             log_frame,
             height=15,
-            bg="#070A10",
-            fg="#EAF2FF",
+            bg="#0D0D16",
+            fg="#E6E6F5",
             insertbackground="#FFFFFF",
-            selectbackground="#1D4ED8",
+            selectbackground="#5B3FE0",
             selectforeground="#FFFFFF",
-            relief="solid",
-            borderwidth=1,
+            relief="flat",
+            borderwidth=0,
+            padx=12,
+            pady=10,
             wrap="word",
             font=("Menlo", 11) if platform.system() == "Darwin" else ("Consolas", 10),
         )
@@ -3551,14 +3632,14 @@ class LiveClipperApp(tk.Tk):
         scrollbar.pack(side="right", fill="y")
 
     def _build_clips_table(self, parent: ttk.Frame) -> None:
-        ttk.Label(parent, text="4. Created Clips", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(parent, text="Готовые клипы", style="Section.TLabel").pack(anchor="w")
         ttk.Label(parent, text="Выбери клип и нажми Preview или Reveal file.", style="PanelMuted.TLabel").pack(anchor="w", pady=(4, 0))
         self.clips = ttk.Treeview(parent, columns=("range", "tag", "comment", "mode", "file"), show="headings", height=7)
-        self.clips.heading("range", text="Range")
-        self.clips.heading("tag", text="Tag")
-        self.clips.heading("comment", text="Comment")
-        self.clips.heading("mode", text="Mode")
-        self.clips.heading("file", text="File")
+        self.clips.heading("range", text="Диапазон")
+        self.clips.heading("tag", text="Тег")
+        self.clips.heading("comment", text="Комментарий")
+        self.clips.heading("mode", text="Режим экспорта")
+        self.clips.heading("file", text="Файл")
         self.clips.column("range", width=130, anchor="w")
         self.clips.column("tag", width=80, anchor="w")
         self.clips.column("comment", width=140, anchor="w")
@@ -3567,11 +3648,11 @@ class LiveClipperApp(tk.Tk):
         self.clips.pack(fill="x", pady=(12, 8))
         actions = ttk.Frame(parent, style="Panel.TFrame")
         actions.pack(fill="x")
-        preview_button = ttk.Button(actions, text="Preview selected", style="Accent.TButton", command=self._open_selected_clip)
+        preview_button = ttk.Button(actions, text="▶  Смотреть", style="Accent.TButton", command=self._open_selected_clip)
         preview_button.pack(side="left")
-        reveal_button = ttk.Button(actions, text="Reveal file", command=self._reveal_selected_clip)
+        reveal_button = ttk.Button(actions, text="Показать файл", command=self._reveal_selected_clip)
         reveal_button.pack(side="left", padx=(10, 0))
-        clear_button = ttk.Button(actions, text="Clear log", command=lambda: self.log_text.delete("1.0", "end"))
+        clear_button = ttk.Button(actions, text="Очистить журнал", command=lambda: self.log_text.delete("1.0", "end"))
         clear_button.pack(side="left", padx=(10, 0))
         ToolTip(preview_button, "Открыть выбранный клип в стандартном видеоплеере.")
         ToolTip(reveal_button, "Показать выбранный файл в Finder или Explorer.")

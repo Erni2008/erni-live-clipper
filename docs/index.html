@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ERNI Live Clipper</title>
+<meta name="description" content="Клипы с live-стримов в максимальном качестве. Бесплатно для macOS и Windows.">
+<style>
+:root{--bg:#0a0a12;--panel:#12121c;--soft:#1a1a28;--line:#2c2c44;--text:#f4f4fa;--muted:#9a9ab0;--accent:#7c5cff;--accent2:#a78bfa;--ok:#4ade9b}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:16px/1.6 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+a{color:inherit;text-decoration:none}
+.wrap{max-width:1100px;margin:0 auto;padding:0 20px}
+nav{display:flex;justify-content:space-between;align-items:center;padding:22px 0}
+.logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:20px}
+.logo i{width:26px;height:26px;border-radius:7px;background:var(--accent);display:grid;place-items:center}
+.logo i:after{content:"";width:9px;height:9px;border-radius:50%;background:#fff}
+.logo span{color:var(--accent2);font-weight:400}
+nav .links{display:flex;gap:22px;color:var(--muted);font-size:15px}
+nav .links a:hover{color:var(--text)}
+.hero{text-align:center;padding:80px 0 60px;position:relative}
+.hero:before{content:"";position:absolute;inset:0 10% auto;height:420px;background:radial-gradient(closest-side,#7c5cff40,transparent);z-index:-1}
+.pill{display:inline-flex;gap:8px;align-items:center;border:1px solid var(--line);background:var(--panel);border-radius:99px;padding:6px 14px;font-size:13px;color:var(--muted)}
+.pill b{width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 10px #e5484d}
+h1{font-size:clamp(38px,7vw,72px);line-height:1.05;letter-spacing:-.03em;margin:22px 0 18px}
+h1 em{font-style:normal;background:linear-gradient(90deg,var(--accent),#ff6bcb);-webkit-background-clip:text;background-clip:text;color:transparent}
+.lead{color:var(--muted);font-size:19px;max-width:620px;margin:0 auto}
+.cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:34px}
+.btn{display:inline-flex;align-items:center;gap:10px;padding:15px 24px;border-radius:12px;font-weight:700;border:1px solid var(--line);background:var(--soft);transition:.15s}
+.btn:hover{transform:translateY(-2px);border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent)}
+.btn small{display:block;font-weight:400;font-size:12px;opacity:.8}
+.note{margin-top:14px;color:var(--muted);font-size:13px}
+.mock{margin:60px auto 0;max-width:900px;border:1px solid var(--line);border-radius:16px;background:var(--panel);overflow:hidden;box-shadow:0 40px 120px #000a}
+.mock .bar{display:flex;gap:7px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.mock .bar i{width:11px;height:11px;border-radius:50%;background:#30304c}
+.mock .in{display:grid;grid-template-columns:1.3fr 1fr;gap:14px;padding:18px;text-align:left}
+.card{background:var(--soft);border-radius:12px;padding:16px}
+.timer{font-size:44px;font-weight:800;letter-spacing:-.02em}
+.ok{color:var(--ok);font-weight:700;font-size:14px}
+.row{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.chip{background:var(--accent);padding:8px 12px;border-radius:8px;font-size:13px;font-weight:700}
+.chip.g{background:#24243a}
+.log{font:12px/1.7 Menlo,Consolas,monospace;color:var(--muted)}
+.log b{color:var(--ok);font-weight:400}
+section{padding:80px 0}
+h2{font-size:clamp(28px,4vw,40px);letter-spacing:-.02em;margin-bottom:12px}
+.sub{color:var(--muted);margin-bottom:36px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.f{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px}
+.f .ic{font-size:24px;margin-bottom:12px}
+.f h3{font-size:17px;margin-bottom:6px}
+.f p{color:var(--muted);font-size:15px}
+.steps{counter-reset:s;display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.steps div{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px}
+.steps div:before{counter-increment:s;content:counter(s);display:grid;place-items:center;width:34px;height:34px;border-radius:9px;background:var(--accent);font-weight:800;margin-bottom:14px}
+.steps p{color:var(--muted);font-size:15px}
+.ru{background:linear-gradient(135deg,#1a1a28,#1f1636);border:1px solid var(--line);border-radius:18px;padding:36px}
+.ru ul{list-style:none;display:grid;gap:12px;margin-top:18px}
+.ru li{padding-left:28px;position:relative;color:#c9c9dd}
+.ru li:before{content:"✓";position:absolute;left:0;color:var(--ok);font-weight:800}
+code{background:#0d0d16;border:1px solid var(--line);border-radius:6px;padding:2px 7px;font-size:14px}
+.dl{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.dl .f{display:flex;flex-direction:column;gap:12px}
+.dl .btn{justify-content:center;margin-top:auto}
+kbd{background:#24243a;border:1px solid var(--line);border-bottom-width:3px;border-radius:6px;padding:1px 8px;font:13px Menlo,monospace}
+table{width:100%;border-collapse:collapse}
+td{padding:12px 0;border-bottom:1px solid var(--line);color:var(--muted)}
+td:first-child{width:200px}
+footer{padding:40px 0;border-top:1px solid var(--line);color:var(--muted);font-size:14px;text-align:center}
+@media(max-width:820px){.grid,.steps,.dl,.mock .in{grid-template-columns:1fr}nav .links{display:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <a class="logo" href="#"><i></i>ERNI<span>Live Clipper</span></a>
+  <div class="links"><a href="#features">Возможности</a><a href="#how">Как работает</a><a href="#russia">Россия</a><a href="#download">Скачать</a></div>
+</nav>
+
+<header class="hero">
+  <div class="pill"><b></b> Бесплатно · macOS и Windows</div>
+  <h1>Лучшие моменты стрима —<br><em>в один клик</em></h1>
+  <p class="lead">Вставь ссылку на live, нажми горячую клавишу — и клип в максимальном качестве уже в папке. Без записи всего стрима.</p>
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/Erni2008/erni-live-clipper/releases/latest">⬇ Скачать для Windows<small>&nbsp;portable .zip</small></a>
+    <a class="btn" href="https://github.com/Erni2008/erni-live-clipper/releases/latest"> Скачать для macOS</a>
+  </div>
+  <p class="note">yt-dlp и ffmpeg уже внутри — ничего ставить не нужно.</p>
+
+  <div class="mock" aria-hidden="true">
+    <div class="bar"><i></i><i></i><i></i></div>
+    <div class="in">
+      <div class="card">
+        <div class="ok">● LIVE · отслеживается</div>
+        <div class="timer">02:14:37</div>
+        <div class="row"><span class="chip">⏪ 30s</span><span class="chip">⏪ 60s</span><span class="chip">⏪ 3m</span><span class="chip g">★ Момент</span></div>
+        <div class="row"><span class="chip g">funny</span><span class="chip g">win</span><span class="chip g">shorts</span></div>
+      </div>
+      <div class="card log">
+        <b>✓</b> clip_02-14-07_funny.mp4<br><b>✓</b> clip_01-58-30_win.mp4<br>→ скачиваю 1080p60…<br>→ H.264 + AAC, 48 kHz<br><b>✓</b> проверено ffprobe
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="features">
+  <h2>Всё для клипов со стримов</h2>
+  <p class="sub">Сделано стримером для стримеров.</p>
+  <div class="grid">
+    <div class="f"><div class="ic">⚡</div><h3>Горячие клавиши</h3><p><kbd>F8</kbd> 30 сек, <kbd>F9</kbd> минута, <kbd>F10</kbd> 3 минуты. Работают поверх игры.</p></div>
+    <div class="f"><div class="ic">🎯</div><h3>Точный диапазон</h3><p>Введи «с» и «по» — скачается ровно этот кусок, а не весь стрим.</p></div>
+    <div class="f"><div class="ic">📍</div><h3>Метки стрима</h3><p>Ставь метки в TXT во время эфира, а клипы скачивай потом.</p></div>
+    <div class="f"><div class="ic">🎬</div><h3>Готово к монтажу</h3><p>MP4 H.264 + AAC с постоянным FPS — открывается в Premiere, DaVinci, CapCut.</p></div>
+    <div class="f"><div class="ic">🏷️</div><h3>Теги и папки</h3><p>funny, rage, win, shorts… Клипы сами раскладываются по папкам и дням.</p></div>
+    <div class="f"><div class="ic">📼</div><h3>Готовые видео</h3><p>Фрагмент из записи стрима или обычного ролика — или скачать целиком.</p></div>
+  </div>
+</section>
+
+<section id="how">
+  <h2>Как это работает</h2>
+  <p class="sub">Три шага, никакой настройки.</p>
+  <div class="steps">
+    <div><h3>Вставь ссылку</h3><p>Ссылка на YouTube live, запись стрима или видео.</p></div>
+    <div><h3>Жми хоткей</h3><p>Случился момент — нажми <kbd>F8</kbd>. Клипы встают в очередь.</p></div>
+    <div><h3>Забирай клип</h3><p>Файл в папке ERNI Live Clipper, лог в CSV для монтажёра.</p></div>
+  </div>
+</section>
+
+<section id="russia">
+  <div class="ru">
+    <h2>🇷🇺 Работает в России</h2>
+    <p class="sub" style="margin:0">Если YouTube тормозит или не открывается — в приложении есть поле <b>«Прокси / VPN»</b>.</p>
+    <ul>
+      <li>Включён VPN на весь компьютер — ничего делать не нужно, всё работает.</li>
+      <li>Есть прокси (например, из Hiddify, v2rayN, Clash) — впиши его адрес в поле, например <code>socks5://127.0.0.1:1080</code> или <code>http://127.0.0.1:7890</code>, и нажми «Применить».</li>
+      <li>Настройка сохраняется — при следующем запуске прокси включится сам.</li>
+      <li>Само приложение и сайт скачиваются с GitHub, который доступен в России без VPN.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="download">
+  <h2>Скачать</h2>
+  <p class="sub">Последняя версия — на странице релизов GitHub.</p>
+  <div class="dl">
+    <div class="f"><h3>🪟 Windows 10 / 11</h3><p>Распакуй ZIP и запусти <code>ERNI Live Clipper.exe</code>. Если SmartScreen предупредит — «Подробнее» → «Выполнить в любом случае».</p><a class="btn primary" href="https://github.com/Erni2008/erni-live-clipper/releases/latest">⬇ Скачать .zip</a></div>
+    <div class="f"><h3> macOS 12+</h3><p>Перетащи приложение в «Программы». При первом запуске: правый клик → «Открыть».</p><a class="btn" href="https://github.com/Erni2008/erni-live-clipper/releases/latest">⬇ Скачать для Mac</a></div>
+  </div>
+  <table style="margin-top:28px">
+    <tr><td>Горячие клавиши</td><td><kbd>F7</kbd> метка · <kbd>F8</kbd> 30с · <kbd>F9</kbd> 60с · <kbd>F10</kbd> 3м · <kbd>F11</kbd> момент</td></tr>
+    <tr><td>Форматы</td><td>Universal Editing MP4 (для монтажа) · Original Fast (без перекодирования)</td></tr>
+    <tr><td>Исходный код</td><td><a href="https://github.com/Erni2008/erni-live-clipper" style="color:var(--accent2)">github.com/Erni2008/erni-live-clipper</a></td></tr>
+  </table>
+</section>
+</div>
+<footer>ERNI Live Clipper · Используй только для своих трансляций или контента, на который есть разрешение.</footer>
+</body>
+</html>
