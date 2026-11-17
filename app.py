@@ -3007,6 +3007,33 @@ def save_settings(data: dict) -> None:
         pass
 
 
+def check_youtube_connection(timeout: float = 8.0) -> tuple[bool, str]:
+    """Quick reachability test for YouTube through the current proxy (HTTP or SOCKS)."""
+    url = "https://www.youtube.com/generate_204"
+    proxy = os.environ.get("HTTPS_PROXY", "")
+    started = time.monotonic()
+    curl = shutil.which("curl")
+    if curl:
+        command = [curl, "-sS", "-o", os.devnull, "-w", "%{http_code}", "--max-time", str(int(timeout)), url]
+        if proxy:
+            command[1:1] = ["-x", proxy]
+        try:
+            completed = run_quiet(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout + 4, check=False)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"{type(exc).__name__}: {exc}"[:160]
+        code = completed.stdout.strip()
+        if completed.returncode != 0 or not code.startswith(("2", "3")):
+            return False, (completed.stderr.strip() or f"HTTP {code}")[:160]
+    else:
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(request, timeout=timeout, context=ssl.create_default_context()) as response:
+                response.read(1)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"{type(exc).__name__}: {exc}"[:160]
+    return True, f"{int((time.monotonic() - started) * 1000)} мс"
+
+
 def apply_proxy_env(proxy: str) -> None:
     """Route yt-dlp, ffmpeg and urllib through a proxy (helps where YouTube is throttled)."""
     keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
@@ -3017,6 +3044,87 @@ def apply_proxy_env(proxy: str) -> None:
             os.environ.pop(key, None)
     import urllib.request as _ur
     _ur.install_opener(_ur.build_opener(_ur.ProxyHandler(_ur.getproxies())))
+
+
+class ScrollFrame(ttk.Frame):
+    """Vertically scrollable container so no control ever ends up off-screen."""
+
+    def __init__(self, parent: tk.Widget, *, bg: str = "#12121C", padding: int = 20) -> None:
+        super().__init__(parent, style="Panel.TFrame")
+        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, borderwidth=0)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.inner = ttk.Frame(self.canvas, style="Panel.TFrame", padding=padding)
+        self._window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner.bind("<Configure>", self._on_inner)
+        self.canvas.bind("<Configure>", self._on_canvas)
+        self.bind_all("<MouseWheel>", self._on_wheel, add="+")
+        self.bind_all("<Button-4>", self._on_wheel, add="+")
+        self.bind_all("<Button-5>", self._on_wheel, add="+")
+
+    def _on_inner(self, _event=None) -> None:
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._update_scrollbar()
+
+    def _on_canvas(self, event) -> None:
+        self.canvas.itemconfigure(self._window, width=event.width)
+        self._update_scrollbar()
+
+    def _update_scrollbar(self) -> None:
+        needs = self.inner.winfo_reqheight() > self.canvas.winfo_height() > 1
+        if needs and not self.scrollbar.winfo_ismapped():
+            self.scrollbar.pack(side="right", fill="y")
+        elif not needs and self.scrollbar.winfo_ismapped():
+            self.scrollbar.pack_forget()
+            self.canvas.yview_moveto(0)
+
+    def _on_wheel(self, event) -> None:
+        if not self.winfo_ismapped() or not self.scrollbar.winfo_ismapped():
+            return
+        widget = self.winfo_containing(event.x_root, event.y_root)
+        while widget is not None and widget is not self:
+            if isinstance(widget, (tk.Text, ttk.Treeview)):
+                return
+            widget = widget.master
+        if widget is None:
+            return
+        if getattr(event, "num", None) == 4:
+            step = -1
+        elif getattr(event, "num", None) == 5:
+            step = 1
+        elif platform.system() == "Darwin":
+            step = -event.delta
+        else:
+            step = -int(event.delta / 120)
+        self.canvas.yview_scroll(step, "units")
+
+
+class FlowRow(ttk.Frame):
+    """Row of equal-width buttons that wraps onto new lines when the window is narrow."""
+
+    def __init__(self, parent: tk.Widget, *, gap: int = 8, style: str = "Panel.TFrame") -> None:
+        super().__init__(parent, style=style)
+        self.gap = gap
+        self._columns = 0
+        self.bind("<Configure>", self._reflow)
+
+    def _reflow(self, _event=None) -> None:
+        items = [c for c in self.winfo_children() if c.winfo_manager() in ("", "grid")]
+        if not items:
+            return
+        width = max(self.winfo_width(), 1)
+        need = max(c.winfo_reqwidth() for c in items) + self.gap
+        columns = max(1, min(len(items), (width + self.gap) // need))
+        if columns == self._columns:
+            return
+        self._columns = columns
+        for index in range(len(items)):
+            self.columnconfigure(index, weight=0, uniform="")
+        for index, child in enumerate(items):
+            row, col = divmod(index, columns)
+            child.grid(row=row, column=col, sticky="ew", padx=(0 if col == 0 else self.gap, 0), pady=(0 if row == 0 else self.gap, 0))
+            self.columnconfigure(col, weight=1, uniform="flow")
 
 
 class ToolTip:
@@ -3062,8 +3170,10 @@ class LiveClipperApp(tk.Tk):
         super().__init__()
         ensure_tool_path()
         self.title(f"ERNI Live Clipper {APP_VERSION}")
-        self.geometry("1360x900")
-        self.minsize(1120, 720)
+        screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
+        width, height = min(1360, screen_w - 60), min(900, screen_h - 120)
+        self.geometry(f"{width}x{height}+{max(0, (screen_w - width) // 2)}+{max(0, (screen_h - height) // 3)}")
+        self.minsize(min(900, screen_w - 40), min(560, screen_h - 100))
 
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.recorder = StreamRecorder(self._log_from_thread, self._status_from_thread)
@@ -3160,7 +3270,7 @@ class LiveClipperApp(tk.Tk):
         style.configure("Timer.TLabel", background="#1A1A28", foreground="#FFFFFF", font=(UI_FONT, 38, "bold"))
         style.configure("Status.TLabel", background="#1A1A28", foreground="#4ADE9B", font=(UI_FONT, 13, "bold"))
         style.configure("SmallStatus.TLabel", background="#1A1A28", foreground="#9A9AB0", font=(UI_FONT, 10, "bold"))
-        style.configure("TButton", padding=(16, 11), relief="flat", font=(UI_FONT, 11, "bold"), background="#24243A", foreground="#FFFFFF", borderwidth=1, focusthickness=3, focuscolor="#A78BFA")
+        style.configure("TButton", padding=(14, 10), relief="flat", font=(UI_FONT, 11, "bold"), background="#24243A", foreground="#FFFFFF", borderwidth=1, focusthickness=3, focuscolor="#A78BFA")
         style.map("TButton", background=[("active", "#30304C"), ("focus", "#30304C"), ("disabled", "#1F1F33")], foreground=[("disabled", "#5A5A72")])
         style.configure("Accent.TButton", background="#7C5CFF", foreground="#FFFFFF")
         style.map("Accent.TButton", background=[("active", "#9277FF"), ("focus", "#9277FF")])
@@ -3261,36 +3371,129 @@ class LiveClipperApp(tk.Tk):
 
         left = ttk.Frame(body, style="Panel.TFrame", padding=0)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
-        right = ttk.Frame(body, style="Panel.TFrame", padding=20)
+        right = ttk.Frame(body, style="Panel.TFrame", padding=(20, 20, 6, 20))
         right.grid(row=0, column=1, sticky="nsew")
 
         self.notebook = ttk.Notebook(left)
         self.notebook.pack(fill="both", expand=True)
-        self.marker_tab = ttk.Frame(self.notebook, style="Panel.TFrame", padding=20)
-        self.live_tab = ttk.Frame(self.notebook, style="Panel.TFrame", padding=20)
-        self.saved_tab = ttk.Frame(self.notebook, style="Panel.TFrame", padding=20)
-        self.notebook.add(self.marker_tab, text="  Метки стрима  ")
-        self.notebook.add(self.live_tab, text="  Live-клипы  ")
-        self.notebook.add(self.saved_tab, text="  Готовое видео  ")
+        marker_scroll = ScrollFrame(self.notebook)
+        live_scroll = ScrollFrame(self.notebook)
+        saved_scroll = ScrollFrame(self.notebook)
+        self.marker_tab = marker_scroll.inner
+        self.live_tab = live_scroll.inner
+        self.saved_tab = saved_scroll.inner
+        self.notebook.add(marker_scroll, text="  Метки стрима  ")
+        self.notebook.add(live_scroll, text="  Live-клипы  ")
+        self.notebook.add(saved_scroll, text="  Готовое видео  ")
 
         self._build_marker_panel(self.marker_tab)
         self._build_capture_panel(self.live_tab)
         self._build_clip_panel(self.live_tab)
         self._build_saved_video_panel(self.saved_tab)
-        self._build_log_panel(right)
-        self._build_clips_table(right)
+        right_scroll = ScrollFrame(right, padding=0)
+        right_scroll.pack(fill="both", expand=True)
+        self._build_log_panel(right_scroll.inner)
+        self._build_clips_table(right_scroll.inner)
+        self._enable_auto_wrap(self)
+
+    def _enable_auto_wrap(self, widget: tk.Widget) -> None:
+        """Wrap long hint texts to the available width instead of cutting them off."""
+        for child in widget.winfo_children():
+            if isinstance(child, (ttk.Label, tk.Label)) and not str(child.cget("textvariable")):
+                text = str(child.cget("text"))
+                if len(text) > 40 and child.winfo_manager() == "pack" and not (isinstance(child, ttk.Label) and str(child.cget("style")) == "Subtitle.TLabel"):
+                    child.configure(justify="left")
+                    parent = child.master
+                    parent.bind(
+                        "<Configure>",
+                        lambda event, label=child: label.configure(wraplength=max(200, event.width - 56)),
+                        add="+",
+                    )
+            self._enable_auto_wrap(child)
 
     def _build_network_bar(self, parent: ttk.Frame) -> None:
         bar = ttk.Frame(parent, style="Soft.TFrame", padding=(16, 10))
         bar.pack(fill="x", pady=(0, 16))
-        ttk.Label(bar, text="🌐  Прокси / VPN", style="SoftStrong.TLabel").pack(side="left")
-        entry = ttk.Entry(bar, textvariable=self.proxy_var, width=38)
-        entry.pack(side="left", padx=(12, 8))
-        apply_button = ttk.Button(bar, text="Применить", style="Tag.TButton", command=self._apply_proxy)
+        top = ttk.Frame(bar, style="Soft.TFrame")
+        top.pack(fill="x")
+        ttk.Label(top, text="🌐  Прокси / VPN", style="SoftStrong.TLabel").pack(side="left")
+        entry = ttk.Entry(top, textvariable=self.proxy_var, width=20)
+        entry.pack(side="left", fill="x", expand=True, padx=(12, 8))
+        apply_button = ttk.Button(top, text="Применить", style="Tag.TButton", command=self._apply_proxy)
         apply_button.pack(side="left")
-        ttk.Label(bar, textvariable=self.proxy_status_var, style="SoftMuted.TLabel").pack(side="left", padx=(14, 0))
+        ttk.Label(bar, textvariable=self.proxy_status_var, style="SoftMuted.TLabel").pack(anchor="w", pady=(6, 0))
         ToolTip(entry, "Если YouTube работает медленно или не открывается (например, в России),\nукажи прокси: socks5://127.0.0.1:1080 или http://host:port.\nОставь пустым, если прокси не нужен или VPN включён на всём компьютере.")
+        check_button = ttk.Button(top, text="Проверить связь", style="Tag.TButton", command=self._check_connection)
+        check_button.pack(side="left", padx=(8, 0))
+        update_button = ttk.Button(top, text="Обновить yt-dlp", style="Tag.TButton", command=self._update_ytdlp)
+        update_button.pack(side="left", padx=(8, 0))
+        ToolTip(update_button, "YouTube часто меняет сайт — если вчера работало, а сегодня нет,\nобнови движок скачивания yt-dlp.")
         ToolTip(apply_button, "Сохранить прокси. Он будет использоваться для yt-dlp и ffmpeg.")
+        ToolTip(check_button, "Проверить, открывается ли YouTube сейчас (с текущим прокси).\nПолезно, если сегодня всё работает медленнее обычного.")
+        self.after(1500, lambda: self._check_connection(silent=True))
+
+    def _check_connection(self, silent: bool = False) -> None:
+        if getattr(self, "_net_check_running", False):
+            return
+        self._net_check_running = True
+        self.proxy_status_var.set("Проверяю связь с YouTube…")
+
+        def worker() -> None:
+            ok, message = check_youtube_connection()
+            def done() -> None:
+                self._net_check_running = False
+                proxy = self.proxy_var.get().strip()
+                via = f"через {proxy}" if proxy else "напрямую"
+                if ok:
+                    self.proxy_status_var.set(f"✓ YouTube доступен {via} · {message}")
+                else:
+                    self.proxy_status_var.set(f"✕ YouTube недоступен {via} — включи VPN или укажи прокси")
+                    if not silent:
+                        messagebox.showwarning(
+                            "Нет связи с YouTube",
+                            "YouTube сейчас не отвечает.\n\n"
+                            "• Включи VPN на компьютере, или\n"
+                            "• впиши адрес прокси в поле «Прокси / VPN» и нажми «Применить».\n\n"
+                            f"Подробности: {message}",
+                        )
+                self._log_from_thread(f"Connection check ({via}): {'OK' if ok else 'FAIL'} — {message}")
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_ytdlp(self) -> None:
+        ytdlp = find_executable("yt-dlp")
+        if not ytdlp:
+            messagebox.showerror("yt-dlp не найден", "Движок yt-dlp не найден. Переустанови приложение.")
+            return
+        self._log_from_thread("Обновляю yt-dlp…")
+
+        def worker() -> None:
+            def version_of() -> str:
+                try:
+                    return run_quiet([ytdlp, "--version"], stdout=subprocess.PIPE, text=True, check=False).stdout.strip()
+                except Exception:  # noqa: BLE001
+                    return "?"
+
+            before = version_of()
+            attempts = [[ytdlp, "-U"]]
+            if not getattr(sys, "frozen", False):
+                attempts.append([sys.executable, "-m", "pip", "install", "-U", "--quiet", "yt-dlp"])
+            if shutil.which("brew"):
+                attempts.append(["brew", "upgrade", "yt-dlp"])
+            for command in attempts:
+                code = run_logged(command, self._log_from_thread)
+                if code == 0 and version_of() != before:
+                    break
+                if code == 0 and command == attempts[0]:
+                    break
+            after = version_of()
+            if after != before:
+                self._log_from_thread(f"✓ yt-dlp обновлён: {before} → {after}")
+            else:
+                self._log_from_thread(f"✓ yt-dlp {after} — уже последняя версия (или обновление недоступно)")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _apply_proxy(self) -> None:
         value = self.proxy_var.get().strip()
@@ -3298,14 +3501,14 @@ class LiveClipperApp(tk.Tk):
         settings = load_settings()
         settings["proxy"] = value
         save_settings(settings)
-        self.proxy_status_var.set(f"Активен: {value}" if value else "Прямое подключение")
         self._log_from_thread(f"Proxy: {value or 'off'}")
+        self._check_connection(silent=True)
 
     def _build_marker_panel(self, parent: ttk.Frame) -> None:
         ttk.Label(parent, text="Метки стрима", style="Section.TLabel").pack(anchor="w")
         ttk.Label(
             parent,
-            text="Вставь live-ссылку, нажми Start Tracking и ставь метки в TXT без скачивания видео.",
+            text="Вставь live-ссылку, нажми «Начать отслеживание» и ставь метки в TXT без скачивания видео.",
             style="PanelMuted.TLabel",
         ).pack(anchor="w", pady=(4, 12))
 
@@ -3340,14 +3543,11 @@ class LiveClipperApp(tk.Tk):
             justify="right",
         ).pack(anchor="e", pady=(6, 0))
 
-        controls = ttk.Frame(parent, style="Panel.TFrame")
+        controls = FlowRow(parent, gap=10)
         controls.pack(fill="x")
         start_button = ttk.Button(controls, text="▶  Начать отслеживание", style="Success.TButton", command=self._start_marker_tracking)
-        start_button.pack(side="left", fill="x", expand=True)
         mark_button = ttk.Button(controls, text="★  Отметить момент", style="Accent.TButton", command=self._write_stream_marker)
-        mark_button.pack(side="left", fill="x", expand=True, padx=(10, 0))
         open_button = ttk.Button(controls, text="Открыть TXT", command=self._open_marker_file)
-        open_button.pack(side="left", padx=(10, 0))
         ToolTip(start_button, "Один раз определить текущий live-таймкод и дальше считать время локально.")
         ToolTip(mark_button, "Записать метку в TXT. Хоткей: F7 или Ctrl+Option+M / Ctrl+Alt+M.")
         ToolTip(open_button, "Открыть TXT с метками.")
@@ -3357,7 +3557,7 @@ class LiveClipperApp(tk.Tk):
         ttk.Label(range_box, text="Диапазон в TXT", background="#1A1A28", foreground="#FFFFFF", font=(UI_FONT, 13, "bold")).pack(anchor="w")
         ttk.Label(
             range_box,
-            text="При метке в документ попадет текущий момент и готовый диапазон From -> To для вкладки Saved Video Range.",
+            text="При метке в документ попадет текущий момент и готовый диапазон From -> To для вкладки «Готовое видео».",
             background="#1A1A28",
             foreground="#9A9AB0",
             font=(UI_FONT, 10),
@@ -3380,7 +3580,7 @@ class LiveClipperApp(tk.Tk):
         help_box.pack(fill="x", pady=(18, 0))
         ttk.Label(
             help_box,
-            text="Сценарий: Start Tracking -> на смешном моменте F7 -> после стрима открыть TXT -> скопировать ссылку и From/To во вкладку Saved Video Range.",
+            text="Сценарий: «Начать отслеживание» → на смешном моменте F7 -> после стрима открыть TXT -> скопировать ссылку и From/To во вкладку «Готовое видео».",
             background="#1A1A28",
             foreground="#C9C9DD",
             font=(UI_FONT, 10),
@@ -3429,28 +3629,23 @@ class LiveClipperApp(tk.Tk):
         sep = ttk.Separator(parent)
         sep.pack(fill="x", pady=18)
         ttk.Label(parent, text="Быстрый клип", style="Section.TLabel").pack(anchor="w")
-        ttk.Label(parent, text="Быстрые кнопки берут последние секунды live. Хоткеи: F8=30s, F9=60s, F10=3m, F11=Mark.", style="PanelMuted.TLabel").pack(anchor="w", pady=(4, 12))
+        ttk.Label(parent, text="Быстрые кнопки берут последние секунды live. Хоткеи: F8=30s, F9=60s, F10=3m, F11 = момент.", style="PanelMuted.TLabel").pack(anchor="w", pady=(4, 12))
 
-        quick = ttk.Frame(parent, style="Panel.TFrame")
+        quick = FlowRow(parent)
         quick.pack(fill="x")
         for title, seconds in QUICK_CLIPS:
             button = ttk.Button(quick, text=f"⏪ {title}", style="Accent.TButton", command=lambda value=seconds: self._quick_clip(value))
-            button.pack(side="left", padx=(0, 8))
             ToolTip(button, f"Скачать последние {title} live и поставить в очередь, если уже идет экспорт.")
         mark_button = ttk.Button(quick, text="★ Момент", command=self._mark_moment)
-        mark_button.pack(side="left", padx=(8, 0))
         ToolTip(mark_button, "Создать клип вокруг текущего момента записи или значения To.")
 
-        tags = ttk.Frame(parent, style="Panel.TFrame")
-        tags.pack(fill="x", pady=(12, 0))
-        ttk.Label(tags, text="Теги:", style="PanelMuted.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 6))
-        for index, tag in enumerate(TAG_PRESETS):
+        ttk.Label(parent, text="Теги", style="PanelMuted.TLabel").pack(anchor="w", pady=(14, 4))
+        tags = FlowRow(parent, gap=6)
+        tags.pack(fill="x")
+        for tag in TAG_PRESETS:
             button = ttk.Button(tags, text=tag, style="Tag.TButton", command=lambda value=tag: self._set_tag(value))
-            button.grid(row=index // 3, column=(index % 3) + 1, sticky="ew", padx=(0, 6), pady=(0, 6))
-            tags.columnconfigure((index % 3) + 1, weight=1)
             ToolTip(button, f"Поставить тег {tag}. Клип сохранится в папку этого тега.")
-        clear_tag = ttk.Button(tags, text="Сброс", command=lambda: self.label_var.set(""))
-        clear_tag.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(0, 6))
+        clear_tag = ttk.Button(tags, text="Сброс", style="Tag.TButton", command=lambda: self.label_var.set(""))
         ToolTip(clear_tag, "Очистить тег. Клип попадет в папку untagged.")
 
         range_box = ttk.Frame(parent, style="Soft.TFrame", padding=12)
@@ -3471,8 +3666,8 @@ class LiveClipperApp(tk.Tk):
         ttk.Label(range_row, text="По", background="#1A1A28", foreground="#9A9AB0", font=(UI_FONT, 10)).pack(side="left")
         to_entry = ttk.Entry(range_row, textvariable=self.range_to_var, width=12)
         to_entry.pack(side="left", padx=(8, 12))
-        range_button = ttk.Button(range_row, text="⬇  Скачать диапазон", style="Accent.TButton", command=self._download_exact_range)
-        range_button.pack(side="left", fill="x", expand=True)
+        range_button = ttk.Button(range_box, text="⬇  Скачать диапазон", style="Accent.TButton", command=self._download_exact_range)
+        range_button.pack(fill="x", pady=(10, 0))
         ToolTip(from_entry, "Начало клипа. Например: 00:25:00, 25:00 или 1500.")
         ToolTip(to_entry, "Конец клипа. Например: 00:25:15, 25:15 или 1515.")
         ToolTip(range_button, "Скачать ровно диапазон From-To из live-ссылки или из локальной записи.")
@@ -3580,7 +3775,7 @@ class LiveClipperApp(tk.Tk):
         ttk.Label(options, text="Режим экспорта", style="PanelMuted.TLabel").grid(row=0, column=1, sticky="w")
         ttk.Combobox(options, textvariable=self.export_mode_var, values=EXPORT_MODES, state="readonly").grid(row=1, column=1, sticky="ew")
 
-        buttons = ttk.Frame(parent, style="Panel.TFrame")
+        buttons = FlowRow(parent, gap=10)
         buttons.pack(fill="x", pady=(18, 0))
         download_button = ttk.Button(
             buttons,
@@ -3588,9 +3783,7 @@ class LiveClipperApp(tk.Tk):
             style="Accent.TButton",
             command=self._download_vod_range,
         )
-        download_button.pack(side="left", fill="x", expand=True)
         open_button = ttk.Button(buttons, text="Открыть папку", command=self._open_folder)
-        open_button.pack(side="left", padx=(10, 0))
         ToolTip(download_button, "Скачать только выбранный диапазон готового видео в максимальном доступном качестве.")
         ToolTip(open_button, "Открыть папку сохранения.")
 
@@ -3613,7 +3806,7 @@ class LiveClipperApp(tk.Tk):
         log_frame.pack(fill="both", expand=True, pady=(12, 14))
         self.log_text = tk.Text(
             log_frame,
-            height=15,
+            height=12,
             bg="#0D0D16",
             fg="#E6E6F5",
             insertbackground="#FFFFFF",
@@ -3633,7 +3826,7 @@ class LiveClipperApp(tk.Tk):
 
     def _build_clips_table(self, parent: ttk.Frame) -> None:
         ttk.Label(parent, text="Готовые клипы", style="Section.TLabel").pack(anchor="w")
-        ttk.Label(parent, text="Выбери клип и нажми Preview или Reveal file.", style="PanelMuted.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Label(parent, text="Выбери клип и нажми «Смотреть» или «Показать файл».", style="PanelMuted.TLabel").pack(anchor="w", pady=(4, 0))
         self.clips = ttk.Treeview(parent, columns=("range", "tag", "comment", "mode", "file"), show="headings", height=7)
         self.clips.heading("range", text="Диапазон")
         self.clips.heading("tag", text="Тег")
@@ -3646,14 +3839,11 @@ class LiveClipperApp(tk.Tk):
         self.clips.column("mode", width=150, anchor="w")
         self.clips.column("file", width=260, anchor="w")
         self.clips.pack(fill="x", pady=(12, 8))
-        actions = ttk.Frame(parent, style="Panel.TFrame")
+        actions = FlowRow(parent, gap=10)
         actions.pack(fill="x")
         preview_button = ttk.Button(actions, text="▶  Смотреть", style="Accent.TButton", command=self._open_selected_clip)
-        preview_button.pack(side="left")
         reveal_button = ttk.Button(actions, text="Показать файл", command=self._reveal_selected_clip)
-        reveal_button.pack(side="left", padx=(10, 0))
         clear_button = ttk.Button(actions, text="Очистить журнал", command=lambda: self.log_text.delete("1.0", "end"))
-        clear_button.pack(side="left", padx=(10, 0))
         ToolTip(preview_button, "Открыть выбранный клип в стандартном видеоплеере.")
         ToolTip(reveal_button, "Показать выбранный файл в Finder или Explorer.")
         ToolTip(clear_button, "Очистить только видимый лог. Файлы и CSV не удаляются.")
@@ -3854,7 +4044,7 @@ class LiveClipperApp(tk.Tk):
         url = self._live_url()
         if not url:
             self._warn_missing_live_url(
-                "Вставь ссылку на live-стрим, потом нажми Start Tracking.",
+                "Вставь ссылку на live-стрим, потом нажми «Начать отслеживание».",
                 focus_live_tab=False,
             )
             return
@@ -3929,7 +4119,7 @@ class LiveClipperApp(tk.Tk):
 
     def _write_stream_marker(self) -> None:
         if not self.marker_tracking:
-            messagebox.showwarning(APP_TITLE, "Сначала нажми Start Tracking на вкладке Stream Markers.")
+            messagebox.showwarning(APP_TITLE, "Сначала нажми «Начать отслеживание» на вкладке Stream Markers.")
             return
         marker_time = self._current_marker_time()
         before = max(0, int(self.marker_before_var.get()))
