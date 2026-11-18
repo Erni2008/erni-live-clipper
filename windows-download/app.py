@@ -36,6 +36,30 @@ CAPTURE_QUALITY_SELECTOR = (
     "best[height<=1080]/best"
 )
 FORMAT_SORT = "height,res,fps,hdr:12,vcodec,br"
+QUALITY_OPTIONS = (
+    ("Максимальное", 0),
+    ("4K · 2160p", 2160),
+    ("1440p", 1440),
+    ("1080p", 1080),
+    ("720p", 720),
+    ("480p", 480),
+    ("360p", 360),
+)
+QUALITY_STATE = {"max_height": 0}
+
+
+def format_sort() -> str:
+    """yt-dlp sort string; prefers the best format not above the chosen height."""
+    height = QUALITY_STATE["max_height"]
+    return f"res:{height},{FORMAT_SORT}" if height else FORMAT_SORT
+
+
+def cap_by_quality(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
+    height = QUALITY_STATE["max_height"]
+    if not height:
+        return candidates
+    allowed = [item for item in candidates if 0 < _format_height(item) <= height]
+    return allowed or candidates
 YOUTUBE_EXTRACTOR_ARGS = "youtube:player_client=default,web,ios"
 COOKIE_BROWSER_ORDER = (
     ("safari", "Safari cookies"),
@@ -199,6 +223,19 @@ def find_executable(name: str) -> str | None:
             if candidate.exists() and os.access(candidate, os.X_OK):
                 return str(candidate)
     return None
+
+
+def reveal_in_folder(path: Path) -> None:
+    """Open the containing folder with the file highlighted (Finder / Explorer)."""
+    if not path.exists():
+        open_path(path.parent if path.parent.exists() else Path.home())
+        return
+    if platform.system() == "Darwin":
+        subprocess.Popen(["open", "-R", str(path)])
+    elif platform.system() == "Windows":
+        subprocess.Popen(["explorer", f"/select,{path}"])
+    else:
+        open_path(path.parent)
 
 
 def open_path(path: Path) -> None:
@@ -799,7 +836,7 @@ def live_format_candidates(info: dict[str, object]) -> tuple[list[dict[str, obje
         )
 
     return (
-        sorted(video_candidates, key=video_score, reverse=True),
+        cap_by_quality(sorted(video_candidates, key=video_score, reverse=True)),
         sorted(audio_candidates, key=audio_score, reverse=True),
     )
 
@@ -846,7 +883,7 @@ def live_format_candidates_any(info: dict[str, object]) -> tuple[list[dict[str, 
     def audio_score(item: dict[str, object]) -> tuple[float, float]:
         return (max(_format_float(item, "abr"), _format_float(item, "tbr")), _format_float(item, "asr"))
 
-    return sorted(video_candidates, key=video_score, reverse=True), sorted(audio_candidates, key=audio_score, reverse=True)
+    return cap_by_quality(sorted(video_candidates, key=video_score, reverse=True)), sorted(audio_candidates, key=audio_score, reverse=True)
 
 
 def select_best_live_formats(info: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
@@ -1688,7 +1725,7 @@ class ClipExporter:
                     "-f",
                     format_selector,
                     "-S",
-                    FORMAT_SORT,
+                    format_sort(),
                     "--ffmpeg-location",
                     str(Path(ffmpeg).parent),
                     "--download-sections",
@@ -1781,7 +1818,7 @@ class ClipExporter:
                 "-f",
                 format_selector,
                 "-S",
-                FORMAT_SORT,
+                format_sort(),
                 "--ffmpeg-location",
                 str(Path(ffmpeg).parent),
                 "--merge-output-format",
@@ -1867,7 +1904,7 @@ class ClipExporter:
                     "-f",
                     format_selector,
                     "-S",
-                    FORMAT_SORT,
+                    format_sort(),
                     "--ffmpeg-location",
                     str(Path(ffmpeg).parent),
                     "--merge-output-format",
@@ -1956,7 +1993,7 @@ class ClipExporter:
                     "-f",
                     format_selector,
                     "-S",
-                    FORMAT_SORT,
+                    format_sort(),
                     "--ffmpeg-location",
                     str(Path(ffmpeg).parent),
                     "--download-sections",
@@ -2217,7 +2254,7 @@ class ClipExporter:
                 YOUTUBE_EXTRACTOR_ARGS,
                 "--live-from-start",
                 "-S",
-                FORMAT_SORT,
+                format_sort(),
                 "-J",
                 url,
             ]
@@ -2529,7 +2566,7 @@ class ClipExporter:
                     "--extractor-args",
                     YOUTUBE_EXTRACTOR_ARGS,
                     "-S",
-                    FORMAT_SORT,
+                    format_sort(),
                     "-J",
                     url,
                 ]
@@ -3225,6 +3262,13 @@ class LiveClipperApp(tk.Tk):
         self.preroll_var = tk.IntVar(value=30)
         self.after_var = tk.IntVar(value=10)
         self.master_file_var = tk.StringVar(value="Master: not recording")
+        saved_quality = load_settings().get("quality", QUALITY_OPTIONS[0][0])
+        if saved_quality not in dict(QUALITY_OPTIONS):
+            saved_quality = QUALITY_OPTIONS[0][0]
+        self.quality_var = tk.StringVar(value=saved_quality)
+        QUALITY_STATE["max_height"] = dict(QUALITY_OPTIONS)[saved_quality]
+        self.quality_var.trace_add("write", lambda *_: self._on_quality_changed())
+        self.done_window: tk.Toplevel | None = None
         self.proxy_var = tk.StringVar(value=load_settings().get("proxy", ""))
         self.proxy_status_var = tk.StringVar(value="")
         apply_proxy_env(self.proxy_var.get().strip())
@@ -3431,6 +3475,64 @@ class LiveClipperApp(tk.Tk):
         ToolTip(apply_button, "Сохранить прокси. Он будет использоваться для yt-dlp и ffmpeg.")
         ToolTip(check_button, "Проверить, открывается ли YouTube сейчас (с текущим прокси).\nПолезно, если сегодня всё работает медленнее обычного.")
         self.after(1500, lambda: self._check_connection(silent=True))
+
+    def _quality_combo(self, parent: tk.Widget) -> ttk.Combobox:
+        combo = ttk.Combobox(parent, textvariable=self.quality_var, values=[name for name, _ in QUALITY_OPTIONS], state="readonly", width=14)
+        ToolTip(combo, "Максимальное — лучшее, что отдаёт площадка.\nЕсли выбранного качества нет, скачается ближайшее ниже.")
+        return combo
+
+    def _on_quality_changed(self) -> None:
+        name = self.quality_var.get()
+        QUALITY_STATE["max_height"] = dict(QUALITY_OPTIONS).get(name, 0)
+        settings = load_settings()
+        settings["quality"] = name
+        save_settings(settings)
+        self._log_from_thread(f"Качество: {name}")
+
+    def _show_done_dialog(self, path: Path, title: str) -> None:
+        """Non-blocking 'video ready' card with buttons to reveal or play the file."""
+        if self.done_window is not None and self.done_window.winfo_exists():
+            self.done_window.destroy()
+        win = tk.Toplevel(self)
+        self.done_window = win
+        win.title("Видео готово")
+        win.configure(bg="#12121C")
+        win.resizable(False, False)
+        win.transient(self)
+        box = tk.Frame(win, bg="#12121C", padx=26, pady=22)
+        box.pack(fill="both", expand=True)
+        tk.Label(box, text="✓", bg="#16A36B", fg="#FFFFFF", font=(UI_FONT, 20, "bold"), width=2).pack(anchor="w")
+        tk.Label(box, text=title, bg="#12121C", fg="#FFFFFF", font=(UI_FONT, 17, "bold")).pack(anchor="w", pady=(12, 2))
+        tk.Label(box, text=path.name, bg="#12121C", fg="#E6E6F5", font=(UI_FONT, 12), wraplength=520, justify="left").pack(anchor="w")
+        size = ""
+        try:
+            size = f" · {path.stat().st_size / 1024 / 1024:.1f} МБ"
+        except OSError:
+            pass
+        tk.Label(box, text=f"{path.parent}{size}", bg="#12121C", fg="#9A9AB0", font=(UI_FONT, 10), wraplength=520, justify="left").pack(anchor="w", pady=(4, 16))
+        buttons = ttk.Frame(box, style="Panel.TFrame")
+        buttons.pack(fill="x")
+
+        def reveal() -> None:
+            reveal_in_folder(path)
+            win.destroy()
+
+        def play() -> None:
+            open_path(path)
+            win.destroy()
+
+        reveal_button = ttk.Button(buttons, text="📂  Показать в папке", style="Accent.TButton", command=reveal)
+        reveal_button.pack(side="left")
+        ttk.Button(buttons, text="▶  Открыть видео", command=play).pack(side="left", padx=(10, 0))
+        ttk.Button(buttons, text="Закрыть", command=win.destroy).pack(side="left", padx=(10, 0))
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.bind("<Return>", lambda _e: reveal())
+        win.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - win.winfo_reqwidth()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - win.winfo_reqheight()) // 3
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        win.lift()
+        reveal_button.focus_set()
 
     def _check_connection(self, silent: bool = False) -> None:
         if getattr(self, "_net_check_running", False):
@@ -3679,6 +3781,8 @@ class LiveClipperApp(tk.Tk):
         ttk.Entry(form, textvariable=self.label_var, width=16).grid(row=1, column=0, sticky="ew", padx=(0, 10))
         ttk.Label(form, text="Режим экспорта", style="PanelMuted.TLabel").grid(row=0, column=1, sticky="w")
         ttk.Combobox(form, textvariable=self.export_mode_var, values=EXPORT_MODES, state="readonly").grid(row=1, column=1, sticky="ew")
+        ttk.Label(form, text="Качество", style="PanelMuted.TLabel").grid(row=0, column=2, sticky="w", padx=(10, 0))
+        self._quality_combo(form).grid(row=1, column=2, sticky="ew", padx=(10, 0))
 
         comment = ttk.Frame(parent, style="Panel.TFrame")
         comment.pack(fill="x", pady=(12, 0))
@@ -3723,7 +3827,7 @@ class LiveClipperApp(tk.Tk):
         ).pack(anchor="w")
         ttk.Label(
             full_box,
-            text="Скачать весь стрим или видео в максимальном доступном качестве.",
+            text="Скачать весь стрим или видео в выбранном качестве (поле «Качество» ниже).",
             background="#1A1A28",
             foreground="#9A9AB0",
             font=(UI_FONT, 10),
@@ -3773,7 +3877,10 @@ class LiveClipperApp(tk.Tk):
         ttk.Label(options, text="Тег / название", style="PanelMuted.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Entry(options, textvariable=self.vod_label_var).grid(row=1, column=0, sticky="ew", padx=(0, 10))
         ttk.Label(options, text="Режим экспорта", style="PanelMuted.TLabel").grid(row=0, column=1, sticky="w")
-        ttk.Combobox(options, textvariable=self.export_mode_var, values=EXPORT_MODES, state="readonly").grid(row=1, column=1, sticky="ew")
+        ttk.Combobox(options, textvariable=self.export_mode_var, values=EXPORT_MODES, state="readonly").grid(row=1, column=1, sticky="ew", padx=(0, 10))
+        options.columnconfigure(2, weight=1)
+        ttk.Label(options, text="Качество", style="PanelMuted.TLabel").grid(row=0, column=2, sticky="w")
+        self._quality_combo(options).grid(row=1, column=2, sticky="ew")
 
         buttons = FlowRow(parent, gap=10)
         buttons.pack(fill="x", pady=(18, 0))
@@ -4637,14 +4744,8 @@ class LiveClipperApp(tk.Tk):
         if not selected:
             return
         path = Path(self.clips.set(selected[0], "file"))
-        if not path.exists():
-            return
-        if platform.system() == "Darwin":
-            subprocess.Popen(["open", "-R", str(path)])
-        elif platform.system() == "Windows":
-            subprocess.Popen(["explorer", f"/select,{path}"])
-        else:
-            open_path(path.parent)
+        if path.exists():
+            reveal_in_folder(path)
 
     def _tools_status(self) -> str:
         yt = "yt-dlp" if find_executable("yt-dlp") else "yt-dlp missing"
@@ -4769,16 +4870,21 @@ class LiveClipperApp(tk.Tk):
                         if was_full_download:
                             self.status_var.set("Full video ready")
                             self._append_log(f"\nFull video ready: {path}\n{message}\n")
-                            self.clips.insert("", "end", values=("FULL VIDEO", "", "", "Full max quality", str(path)))
+                            row = self.clips.insert("", "end", values=("ВСЁ ВИДЕО", "", "", self.quality_var.get(), str(path)))
+                            self._show_done_dialog(Path(path), "Видео скачано")
                         elif job:
                             self.status_var.set("Clip ready")
                             self._append_log(f"\nClip ready: {path}\n{message}\n")
                             self._append_clip_metadata(job, path, message)
-                            self.clips.insert("", "end", values=(job.range_label, job.tag, job.comment, job.mode, str(path)))
+                            row = self.clips.insert("", "end", values=(job.range_label, job.tag, job.comment, job.mode, str(path)))
+                            self._show_done_dialog(Path(path), "Клип готов")
                         else:
                             self.status_var.set("File ready")
                             self._append_log(f"\nFile ready: {path}\n{message}\n")
-                            self.clips.insert("", "end", values=("FILE", "", "", "", str(path)))
+                            row = self.clips.insert("", "end", values=("ФАЙЛ", "", "", "", str(path)))
+                            self._show_done_dialog(Path(path), "Файл готов")
+                        self.clips.selection_set(row)
+                        self.clips.see(row)
                     else:
                         self.status_var.set("Export error")
                         self._append_log(f"\nExport error: {message}\n")
