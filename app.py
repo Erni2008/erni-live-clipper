@@ -30,22 +30,76 @@ import tkinter as tk
 APP_TITLE = "ERNI Live Clipper Updated"
 APP_VERSION = "1.0.0"
 QUALITY_SELECTOR = "bestvideo*+bestaudio/best"
-CAPTURE_QUALITY_SELECTOR = (
-    "bestvideo[height<=1080][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
-    "bestvideo[height<=1080]+bestaudio/"
-    "best[height<=1080]/best"
-)
 FORMAT_SORT = "height,res,fps,hdr:12,vcodec,br"
-QUALITY_OPTIONS = (
-    ("Максимальное", 0),
-    ("4K · 2160p", 2160),
-    ("1440p", 1440),
-    ("1080p", 1080),
-    ("720p", 720),
-    ("480p", 480),
-    ("360p", 360),
-)
-QUALITY_STATE = {"max_height": 0}
+QUALITY_PRESETS = (2160, 1440, 1080, 720, 480, 360)
+QUALITY_NAMES = {4320: "8K", 2160: "4K", 1440: "2K", 1080: "Full HD", 720: "HD"}
+
+
+def quality_label(height: int, fps: int = 0, hdr: bool = False) -> str:
+    parts = [f"{height}p"]
+    if height in QUALITY_NAMES:
+        parts.append(QUALITY_NAMES[height])
+    if fps:
+        parts.append(f"{fps} fps")
+    if hdr:
+        parts.append("HDR")
+    return " · ".join(parts)
+
+
+def probe_video_qualities(url: str, timeout: float = 90.0) -> list[tuple[int, int, bool]]:
+    """Ask yt-dlp which video heights exist for this URL. Returns [(height, fps, hdr)] best first."""
+    ytdlp = find_executable("yt-dlp")
+    if not ytdlp:
+        raise RuntimeError("yt-dlp не найден")
+    command = [ytdlp, "--no-playlist", "--no-warnings", "--extractor-args", YOUTUBE_EXTRACTOR_ARGS, "-J", url]
+    completed = run_quiet(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                          encoding="utf-8", errors="replace", timeout=timeout, check=False)
+    if completed.returncode != 0 or not completed.stdout.strip():
+        raise RuntimeError((completed.stderr.strip().splitlines() or ["не удалось получить форматы"])[-1][:200])
+    info = json.loads(completed.stdout)
+    best: dict[int, tuple[int, bool]] = {}
+    for item in info.get("formats") or []:
+        if not isinstance(item, dict) or item.get("vcodec") in (None, "none"):
+            continue
+        height = _format_height(item)
+        if height <= 0:
+            continue
+        fps = int(round(_format_float(item, "fps")))
+        hdr = str(item.get("dynamic_range") or "SDR").upper() not in ("", "SDR", "NONE")
+        old = best.get(height, (0, False))
+        best[height] = (max(old[0], fps), old[1] or hdr)
+    return [(h, f, hd) for h, (f, hd) in sorted(best.items(), reverse=True)]
+
+
+QUALITY_STATE = {"max_height": 0, "best_available": 0}
+
+
+class QualityTooLow(RuntimeError):
+    pass
+
+
+def wanted_height() -> int:
+    """Height the user expects (0 = unknown)."""
+    chosen, best = QUALITY_STATE["max_height"], QUALITY_STATE["best_available"]
+    if chosen and best:
+        return min(chosen, best)
+    return chosen or best
+
+
+def video_height(path: Path) -> int:
+    try:
+        out = run_quiet(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height",
+                         "-of", "csv=p=0", str(path)], stdout=subprocess.PIPE, text=True, check=False).stdout
+        return int(out.strip().splitlines()[0])
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def capture_quality_selector() -> str:
+    height = QUALITY_STATE["max_height"]
+    if height:
+        return f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
+    return "bestvideo*+bestaudio/best"
 
 
 def format_sort() -> str:
@@ -1157,7 +1211,7 @@ class StreamRecorder:
             "--extractor-args",
             YOUTUBE_EXTRACTOR_ARGS,
             "-f",
-            CAPTURE_QUALITY_SELECTOR,
+            capture_quality_selector(),
             "-J",
             url,
         ]
@@ -1768,6 +1822,10 @@ class ClipExporter:
             raise RuntimeError("fast section download did not create a video file")
 
         section_source = max(candidates, key=lambda path: path.stat().st_mtime)
+        got, want = video_height(section_source), wanted_height()
+        if want and got and got < want:
+            section_source.unlink(missing_ok=True)
+            raise QualityTooLow(f"fast section gave {got}p, but {want}p was requested")
         raw_report = probe_media(section_source)
         self.on_log(f"Downloaded fast section check: {raw_report.message}\n")
 
@@ -2599,19 +2657,38 @@ class ClipExporter:
                     mode,
                 )
             else:
-                target = self._download_vod_section_fast(
-                    yt_dlp,
-                    ffmpeg,
-                    url,
-                    temp_dir,
-                    clips_dir,
-                    stamp,
-                    clean_label,
-                    range_name,
-                    start,
-                    end,
-                    mode,
-                )
+                try:
+                    target = self._download_vod_section_fast(
+                        yt_dlp,
+                        ffmpeg,
+                        url,
+                        temp_dir,
+                        clips_dir,
+                        stamp,
+                        clean_label,
+                        range_name,
+                        start,
+                        end,
+                        mode,
+                    )
+                except QualityTooLow as exc:
+                    self.on_log(
+                        f"\n{exc}. YouTube не даёт вырезать кусок в этом качестве напрямую — "
+                        "скачиваю исходник в выбранном качестве и вырезаю фрагмент локально.\n"
+                    )
+                    target = self._download_vod_full_source_then_cut(
+                        yt_dlp,
+                        ffmpeg,
+                        url,
+                        temp_dir,
+                        clips_dir,
+                        stamp,
+                        clean_label,
+                        range_name,
+                        start,
+                        end,
+                        mode,
+                    )
 
             report = probe_media(target)
             self.on_finish(True, target, report.message)
@@ -3262,12 +3339,15 @@ class LiveClipperApp(tk.Tk):
         self.preroll_var = tk.IntVar(value=30)
         self.after_var = tk.IntVar(value=10)
         self.master_file_var = tk.StringVar(value="Master: not recording")
-        saved_quality = load_settings().get("quality", QUALITY_OPTIONS[0][0])
-        if saved_quality not in dict(QUALITY_OPTIONS):
-            saved_quality = QUALITY_OPTIONS[0][0]
-        self.quality_var = tk.StringVar(value=saved_quality)
-        QUALITY_STATE["max_height"] = dict(QUALITY_OPTIONS)[saved_quality]
+        self.quality_var = tk.StringVar()
+        self.quality_status_var = tk.StringVar(value="Вставь ссылку — покажу, какое качество доступно.")
+        self.quality_choices: list[tuple[str, int]] = []
+        self.quality_combos: list[ttk.Combobox] = []
+        self._quality_probe_token = 0
+        self._quality_probed_url = ""
+        self._set_quality_choices(None, preferred=int(load_settings().get("quality_height", 0) or 0))
         self.quality_var.trace_add("write", lambda *_: self._on_quality_changed())
+        self._on_quality_changed()
         self.done_window: tk.Toplevel | None = None
         self.proxy_var = tk.StringVar(value=load_settings().get("proxy", ""))
         self.proxy_status_var = tk.StringVar(value="")
@@ -3475,19 +3555,98 @@ class LiveClipperApp(tk.Tk):
         ToolTip(apply_button, "Сохранить прокси. Он будет использоваться для yt-dlp и ffmpeg.")
         ToolTip(check_button, "Проверить, открывается ли YouTube сейчас (с текущим прокси).\nПолезно, если сегодня всё работает медленнее обычного.")
         self.after(1500, lambda: self._check_connection(silent=True))
+        self.after(2500, self._check_ytdlp_age)
 
-    def _quality_combo(self, parent: tk.Widget) -> ttk.Combobox:
-        combo = ttk.Combobox(parent, textvariable=self.quality_var, values=[name for name, _ in QUALITY_OPTIONS], state="readonly", width=14)
-        ToolTip(combo, "Максимальное — лучшее, что отдаёт площадка.\nЕсли выбранного качества нет, скачается ближайшее ниже.")
-        return combo
+    def _build_quality_box(self, parent: tk.Widget, url_var: tk.StringVar) -> None:
+        box = ttk.Frame(parent, style="Soft.TFrame", padding=14)
+        box.pack(fill="x", pady=(14, 0))
+        ttk.Label(box, text="Качество видео", style="SoftStrong.TLabel").pack(anchor="w")
+        row = ttk.Frame(box, style="Soft.TFrame")
+        row.pack(fill="x", pady=(8, 0))
+        combo = ttk.Combobox(row, textvariable=self.quality_var, values=[label for label, _ in self.quality_choices], state="readonly", width=28)
+        combo.pack(side="left", fill="x", expand=True)
+        self.quality_combos.append(combo)
+        probe = ttk.Button(row, text="🔍  Узнать качество", style="Tag.TButton", command=lambda: self._probe_quality(url_var.get(), force=True))
+        probe.pack(side="left", padx=(10, 0))
+        status = ttk.Label(box, textvariable=self.quality_status_var, style="SoftMuted.TLabel")
+        status.pack(anchor="w", pady=(6, 0))
+        ToolTip(combo, "Выбери качество до нажатия «Скачать».\n★ Максимальное — лучшее, что есть у этого видео.")
+        ToolTip(probe, "Спросить YouTube, какие качества есть у этой ссылки.")
+
+        def on_url_change(*_args) -> None:
+            url = url_var.get().strip()
+            if url.startswith(("http://", "https://")):
+                self.after(700, lambda: url_var.get().strip() == url and self._probe_quality(url))
+
+        url_var.trace_add("write", on_url_change)
+
+    def _set_quality_choices(self, available: list[tuple[int, int, bool]] | None, preferred: int | None = None) -> None:
+        if preferred is None:
+            preferred = QUALITY_STATE["max_height"]
+        if available:
+            top = available[0]
+            choices = [(f"★ Максимальное — {quality_label(*top)}", 0)]
+            choices += [(quality_label(h, f, hd), h) for h, f, hd in available if h >= 144]
+        else:
+            choices = [("★ Максимальное доступное", 0)] + [(quality_label(h), h) for h in QUALITY_PRESETS]
+        self.quality_choices = choices
+        for combo in self.quality_combos:
+            combo.configure(values=[label for label, _ in choices])
+        heights = [h for _, h in choices]
+        if preferred and preferred not in heights:
+            lower = [h for h in heights if h and h <= preferred]
+            preferred = lower[0] if lower else 0
+        self.quality_var.set(next(label for label, h in choices if h == preferred))
+
+    def _probe_quality(self, url: str, force: bool = False) -> None:
+        url = url.strip()
+        if not url.startswith(("http://", "https://")):
+            if force:
+                self.quality_status_var.set("Сначала вставь ссылку на видео или стрим.")
+            return
+        if url == self._quality_probed_url and not force:
+            return
+        self._quality_probed_url = url
+        QUALITY_STATE["best_available"] = 0
+        self._quality_probe_token += 1
+        token = self._quality_probe_token
+        self.quality_status_var.set("⏳ Узнаю доступное качество…")
+
+        def worker() -> None:
+            try:
+                result: list[tuple[int, int, bool]] | Exception = probe_video_qualities(url)
+            except Exception as exc:  # noqa: BLE001
+                result = exc
+
+            def done() -> None:
+                if token != self._quality_probe_token:
+                    return
+                if isinstance(result, Exception) or not result:
+                    self._quality_probed_url = ""
+                    self.quality_status_var.set(f"Не удалось узнать качество: {result or 'нет видеоформатов'}. Можно скачать «Максимальное».")
+                    return
+                QUALITY_STATE["best_available"] = result[0][0]
+                self._set_quality_choices(result)
+                top = quality_label(*result[0])
+                listing = ", ".join(f"{h}p" for h, _, _ in result[:6])
+                self.quality_status_var.set(f"✓ Максимум у этого видео: {top}   ·   доступно: {listing}")
+                self._log_from_thread(f"Доступное качество: {listing}")
+
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _on_quality_changed(self) -> None:
-        name = self.quality_var.get()
-        QUALITY_STATE["max_height"] = dict(QUALITY_OPTIONS).get(name, 0)
+        label = self.quality_var.get()
+        height = next((h for name, h in self.quality_choices if name == label), 0)
+        if QUALITY_STATE["max_height"] == height and getattr(self, "_quality_logged", False):
+            return
+        self._quality_logged = True
+        QUALITY_STATE["max_height"] = height
         settings = load_settings()
-        settings["quality"] = name
+        settings["quality_height"] = height
         save_settings(settings)
-        self._log_from_thread(f"Качество: {name}")
+        self._log_from_thread(f"Качество: {label}")
 
     def _show_done_dialog(self, path: Path, title: str) -> None:
         """Non-blocking 'video ready' card with buttons to reveal or play the file."""
@@ -3560,6 +3719,29 @@ class LiveClipperApp(tk.Tk):
                         )
                 self._log_from_thread(f"Connection check ({via}): {'OK' if ok else 'FAIL'} — {message}")
             self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _check_ytdlp_age(self) -> None:
+        def worker() -> None:
+            ytdlp = find_executable("yt-dlp")
+            if not ytdlp:
+                return
+            try:
+                version = run_quiet([ytdlp, "--version"], stdout=subprocess.PIPE, text=True, timeout=20, check=False).stdout.strip()
+                age = (datetime.now() - datetime.strptime(".".join(version.split(".")[:3]), "%Y.%m.%d")).days
+            except Exception:  # noqa: BLE001
+                return
+            if age > 45:
+                def warn() -> None:
+                    self._log_from_thread(f"yt-dlp {version} устарел ({age} дн.). Нажми «Обновить yt-dlp» — иначе YouTube может не отдавать 2K/4K.")
+                    if messagebox.askyesno(
+                        "Обновить движок скачивания?",
+                        f"Версии yt-dlp уже {age} дней.\n\nYouTube часто меняется: со старой версией 2K/4K может не скачиваться "
+                        "или скачивание вообще перестанет работать.\n\nОбновить сейчас?",
+                    ):
+                        self._update_ytdlp()
+                self.after(0, warn)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3708,6 +3890,7 @@ class LiveClipperApp(tk.Tk):
         folder_button = ttk.Button(folder_row, text="Папка", command=self._choose_folder)
         folder_button.pack(side="left", padx=(10, 0))
         ToolTip(folder_button, "Выбрать папку, куда сохранять клипы и CSV-лог.")
+        self._build_quality_box(parent, self.url_var)
 
         status = ttk.Frame(parent, style="Soft.TFrame", padding=16)
         status.pack(fill="x", pady=(16, 14))
@@ -3781,8 +3964,6 @@ class LiveClipperApp(tk.Tk):
         ttk.Entry(form, textvariable=self.label_var, width=16).grid(row=1, column=0, sticky="ew", padx=(0, 10))
         ttk.Label(form, text="Режим экспорта", style="PanelMuted.TLabel").grid(row=0, column=1, sticky="w")
         ttk.Combobox(form, textvariable=self.export_mode_var, values=EXPORT_MODES, state="readonly").grid(row=1, column=1, sticky="ew")
-        ttk.Label(form, text="Качество", style="PanelMuted.TLabel").grid(row=0, column=2, sticky="w", padx=(10, 0))
-        self._quality_combo(form).grid(row=1, column=2, sticky="ew", padx=(10, 0))
 
         comment = ttk.Frame(parent, style="Panel.TFrame")
         comment.pack(fill="x", pady=(12, 0))
@@ -3815,6 +3996,7 @@ class LiveClipperApp(tk.Tk):
         paste_button = ttk.Button(url_row, text="Вставить", command=self._paste_vod_url)
         paste_button.pack(side="left", padx=(10, 0))
         ToolTip(paste_button, "Вставить ссылку на законченный стрим или видео из буфера.")
+        self._build_quality_box(parent, self.vod_url_var)
 
         full_box = ttk.Frame(parent, style="Soft.TFrame", padding=14)
         full_box.pack(fill="x", pady=(14, 0))
@@ -3827,7 +4009,7 @@ class LiveClipperApp(tk.Tk):
         ).pack(anchor="w")
         ttk.Label(
             full_box,
-            text="Скачать весь стрим или видео в выбранном качестве (поле «Качество» ниже).",
+            text="Скачать весь стрим или видео в качестве, выбранном выше в блоке «Качество видео».",
             background="#1A1A28",
             foreground="#9A9AB0",
             font=(UI_FONT, 10),
@@ -3877,10 +4059,7 @@ class LiveClipperApp(tk.Tk):
         ttk.Label(options, text="Тег / название", style="PanelMuted.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Entry(options, textvariable=self.vod_label_var).grid(row=1, column=0, sticky="ew", padx=(0, 10))
         ttk.Label(options, text="Режим экспорта", style="PanelMuted.TLabel").grid(row=0, column=1, sticky="w")
-        ttk.Combobox(options, textvariable=self.export_mode_var, values=EXPORT_MODES, state="readonly").grid(row=1, column=1, sticky="ew", padx=(0, 10))
-        options.columnconfigure(2, weight=1)
-        ttk.Label(options, text="Качество", style="PanelMuted.TLabel").grid(row=0, column=2, sticky="w")
-        self._quality_combo(options).grid(row=1, column=2, sticky="ew")
+        ttk.Combobox(options, textvariable=self.export_mode_var, values=EXPORT_MODES, state="readonly").grid(row=1, column=1, sticky="ew")
 
         buttons = FlowRow(parent, gap=10)
         buttons.pack(fill="x", pady=(18, 0))
@@ -4767,6 +4946,8 @@ class LiveClipperApp(tk.Tk):
         self.events.put(("status", status))
 
     def _log_from_thread(self, text: str) -> None:
+        if text and not text.endswith(("\n", "\r")):
+            text += "\n"
         self.events.put(("log", text))
 
     def _export_finished_from_thread(self, success: bool, path: Path | None, message: str) -> None:
